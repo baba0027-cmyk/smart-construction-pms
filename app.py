@@ -172,10 +172,11 @@ if sheet:
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
-    # --- [Sidebar] 신규 현장 등록 ---
+    # --- [Sidebar] 관리자 전용 기능 ---
     if user_role == "admin":
-        with st.sidebar.expander("🚀 신규 현장 즉시 등록 (동기화)", expanded=True):
-            with st.form("quick_add_site"):
+        # [A] 신규 현장 등록
+        with st.sidebar.expander("🚀 신규 현장 즉시 등록", expanded=False):
+            with st.form("quick_add_site_form", clear_on_submit=True): # clear_on_submit 추가로 중복 생성 방지
                 new_site_name = st.text_input("📍 신규 현장명 *")
                 new_site_manager = st.text_input("👤 현장 소장")
                 new_site_mw = st.number_input("⚡ 용량 (MW)", min_value=0.0, step=0.1)
@@ -185,7 +186,10 @@ if sheet:
                 if submit_new_site:
                     if not new_site_name:
                         st.error("현장명은 반드시 입력해야 합니다!")
+                    elif new_site_name in projects_df['현장'].values:
+                        st.error("이미 존재하는 현장명입니다!")
                     else:
+                        # 마스터 스키마에 맞춰 데이터 생성
                         new_p_data = {col: "" for col in PROJECTS_SCHEMA}
                         new_p_data.update({
                             "현장": new_site_name, "소장": new_site_manager, "용량 (MW)": new_site_mw,
@@ -198,11 +202,36 @@ if sheet:
                             "현장": new_site_name, "소장": new_site_manager,
                             "예정 구조물": 0, "예정 전기": 0, "누적 구조물": 0, "누적 전기": 0, "총 인원": 0
                         })
+                        
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_data])], ignore_index=True)
                         updated_m = pd.concat([managers_df, pd.DataFrame([new_m_data])], ignore_index=True)
+                        
                         if save_data_to_sheet(sheet, updated_m, updated_p):
-                            st.success(f"✅ '{new_site_name}' 현장이 생성되었습니다!"); st.rerun()
+                            st.success(f"✅ '{new_site_name}' 생성 완료!")
+                            st.rerun()
 
+        # [B] 현장 삭제 기능 (신규 추가됨)
+        with st.sidebar.expander("🗑️ 현장 삭제 (관리자용)", expanded=False):
+            if not projects_df.empty:
+                site_to_delete = st.selectbox("삭제할 현장 선택", projects_df['현장'].tolist(), key="delete_site_sel")
+                st.warning(f"⚠️ '{site_to_delete}' 현장을 삭제하면 모든 인력 데이터도 함께 삭제됩니다.")
+                confirm_delete = st.checkbox("❌ 삭제를 확정합니다", key="confirm_delete_check")
+                
+                if st.button("🚨 현장 삭제 실행", key="btn_delete_exec"):
+                    if confirm_delete:
+                        # 데이터 필터링 (해당 현장 제외)
+                        updated_p = projects_df[projects_df['현장'] != site_to_delete]
+                        updated_m = managers_df[managers_df['현장'] != site_to_delete]
+                        
+                        if save_data_to_sheet(sheet, updated_m, updated_p):
+                            st.error(f"✅ '{site_to_delete}' 현장이 삭제되었습니다!")
+                            st.rerun()
+                    else:
+                        st.info("⚠️ 삭제를 확정하려면 체크박스를 선택해주세요.")
+            else:
+                st.info("삭제할 현장이 없습니다.")
+
+    # --- 상단 알림 ---
     if not projects_df.empty:
         high_risk = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
@@ -283,9 +312,7 @@ if sheet:
                     "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
                     "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d")
                 }
-                # [FIX] key="editor_tab2" 추가
                 edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
-                # [FIX] key="btn_save_tab2" 추가
                 if st.button("💾 변경사항 저장", key="btn_save_tab2"):
                     if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
             else:
@@ -302,9 +329,7 @@ if sheet:
                 "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
-            # [FIX] key="editor_tab3" 추가
             edited_p = st.data_editor(projects_df, column_config=col_config, use_container_width=True, key="editor_tab3")
-            # [FIX] key="btn_save_tab3" 추가
             if st.button("💾 프로젝트 변경사항 저장", key="btn_save_tab3"):
                 if save_data_to_sheet(sheet, managers_df, edited_p): st.success("✅ 저장 완료!"); st.rerun()
             st.download_button("📥 엑셀 다운로드", export_to_excel(projects_df), "projects.xlsx", key="btn_dl_excel")
@@ -317,7 +342,6 @@ if sheet:
         if user_role == "admin":
             if '이름' in managers_df.columns and managers_df['이름'].nunique() > len(managers_df):
                 st.info("💡 [소장님 개인별 관리 모드]")
-                # [FIX] key="editor_tab4_mgr" 추가
                 st.data_editor(managers_df, use_container_width=True, key="editor_tab4_mgr")
             else:
                 st.info("💡 [현장별 인력 투입 관리 모드]")
@@ -328,9 +352,7 @@ if sheet:
                     "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
                     "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d")
                 }
-                # [FIX] key="editor_tab4_site" 추가
                 edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
-                # [FIX] key="btn_save_tab4" 추가
                 if st.button("💾 저장", key="btn_save_tab4"):
                     if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
         else:
