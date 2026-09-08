@@ -14,61 +14,60 @@ def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
         if "gcp_json" in st.secrets:
-            # [에러 방지] JSON 파싱 및 줄바꿈(\n) 자동 교정
             creds_dict = json.loads(st.secrets["gcp_json"])
             if "private_key" in creds_dict:
                 creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            # 로컬 환경용
             creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
         
         client = gspread.authorize(creds)
-        # 사용자님의 시트 ID
         sheet = client.open_by_key("1p-m_7hhsKMRacNlejARKExVtTfQrkAaJpZ_zm7_EZco") 
         return sheet
     except Exception as e:
         st.error(f"구글 시트 연결 실패! 원인: {e}")
         return None
 
-# --- 2. 데이터 로드 (UnhashableParamError 완벽 해결 버전) ---
+# --- 2. 데이터 로드 ---
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
-    # [핵심] 함수 인자로 sheet를 받지 않고, 내부에서 직접 호출하여 캐싱 에러 방지
     sheet = connect_to_gsheets()
-    if sheet is None:
-        return pd.DataFrame(), pd.DataFrame()
+    if sheet is None: return pd.DataFrame(), pd.DataFrame()
     
     try:
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         
         if not projects_df.empty:
-            projects_df['종료일'] = pd.to_datetime(projects_df['종료일'])
+            # 날짜 형식 변환
+            for col in ['공사 시작일', '종료일']:
+                if col in projects_df.columns:
+                    projects_df[col] = pd.to_datetime(projects_df[col])
+            # 공정율 숫자 변환
             for col in ["구조물 공정율", "전기 공정율"]:
-                if col not in projects_df.columns:
-                    projects_df[col] = 0
+                if col in projects_df.columns:
+                    projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
         return managers_df, projects_df
     except Exception as e:
         st.error(f"데이터 로드 중 오류 발생: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# --- 3. 데이터 저장 (저장 후 캐시를 비워 데이터 갱신 유도) ---
+# --- 3. 데이터 저장 ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
-        # 1. Managers 저장
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
         ws_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
         
-        # 2. Projects 저장
         ws_p = sheet.worksheet("projects")
         ws_p.clear()
         projects_copy = projects_df.copy()
-        projects_copy['종료일'] = projects_copy['종료일'].dt.strftime('%Y-%m-%d')
+        # 날짜를 다시 문자열로 변환하여 저장
+        for col in ['공사 시작일', '종료일']:
+            if col in projects_copy.columns:
+                projects_copy[col] = projects_copy[col].dt.strftime('%Y-%m-%d')
         ws_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
         
-        # [중요] 저장 성공 시 캐시를 삭제하여 다음 로드 시 새 데이터를 가져오게 함
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -84,32 +83,27 @@ def handle_auth():
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password")
         admin_pw = st.secrets.get("ADMIN_PW", "1931")
-        
         if password == admin_pw:
             user_role = "admin"
             st.sidebar.success("✅ 관리자 모드 활성화")
         elif password != "":
             st.sidebar.error("❌ 비밀번호가 틀렸습니다.")
-    else:
-        st.sidebar.info("👁️ 조회자 모드 (읽기 전용)")
     return user_role
 
 # --- 5. 메인 앱 실행 ---
-st.set_page_config(page_title="스마트 건설 PMS", layout="wide")
-st.title("🏗️ 스마트 건설 프로젝트 관리 시스템")
+st.set_page_config(page_title="스마트 건설 PMS Pro", layout="wide")
+st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
 user_role = handle_auth()
 sheet = connect_to_gsheets()
 
 if sheet:
-    # [핵심] 인자 없이 호출하여 에러 방지
     managers_df, projects_df = load_data_from_sheet()
     
     if managers_df.empty and projects_df.empty:
-        st.warning("데이터를 불러올 수 없습니다. 구글 시트의 시트 이름(managers, projects)과 데이터 형식을 확인하세요.")
+        st.warning("데이터를 불러올 수 없습니다. 구글 시트 헤더 설정을 확인하세요.")
         st.stop()
 
-    # 날씨 데이터 (예시)
     weather_data = {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람", "울산": "☀️ 맑음", "대전": "☁️ 흐림", "제주": "🌦️ 비", "세종": "☀️ 맑음", "창원": "☀️ 맑음"}
 
     # --- 관리자용 기능 (사이드바) ---
@@ -118,15 +112,13 @@ if sheet:
         st.sidebar.header("➕ 새 프로젝트 배정")
         new_p_name = st.sidebar.text_input("현장명")
         
-        # 가용 인력 필터링
-        if '상태' in managers_df.columns:
-            available_managers = managers_df[managers_df['상태'] == '휴식중']['이름'].tolist()
-        else:
-            available_managers = managers_df['이름'].tolist()
-
+        available_managers = managers_df[managers_df['상태'] == '휴식중']['이름'].tolist() if '상태' in managers_df.columns else managers_df['이름'].tolist()
         selected_manager = st.sidebar.selectbox("배정할 소장 선택", available_managers if available_managers else managers_df['이름'].tolist())
-        new_p_location = st.sidebar.selectbox("지역", list(weather_data.keys()))
+        
+        new_p_location = st.sidebar.selectbox("위치(지역)", list(weather_data.keys()))
+        new_p_start_date = st.sidebar.date_input("공사 시작일", datetime.now())
         new_p_end_date = st.sidebar.date_input("종료 예정일", datetime.now() + timedelta(days=30))
+        new_p_safety = st.sidebar.selectbox("초기 안전 등급", ["정상", "주의", "위험"])
 
         if st.sidebar.button("프로젝트 생성 및 배정"):
             if new_p_name:
@@ -135,11 +127,13 @@ if sheet:
                 
                 new_project = {
                     "현장명": new_p_name, "소장": selected_manager, "위치": new_p_location, 
-                    "위도": lat, "경도": lon, "공정": "준비 중", "종료일": pd.to_datetime(new_p_end_date),
+                    "위도": lat, "경도": lon, "공사 시작일": pd.to_datetime(new_p_start_date),
+                    "안전 등급": new_p_safety, "공정": "준비 중", "종료일": pd.to_datetime(new_p_end_date),
                     "구조물 공정율": 0, "전기 공정율": 0
                 }
                 projects_df = pd.concat([projects_df, pd.DataFrame([new_project])], ignore_index=True)
-                managers_df.loc[managers_df['이름'] == selected_manager, '상태'] = '공사중'
+                if '상태' in managers_df.columns:
+                    managers_df.loc[managers_df['이름'] == selected_manager, '상태'] = '공사중'
                 
                 if save_data_to_sheet(sheet, managers_df, projects_df):
                     st.sidebar.success(f"✅ {new_p_name} 배정 완료!")
@@ -185,24 +179,39 @@ if sheet:
     with tab3:
         st.subheader("📋 프로젝트 전체 정보 관리")
         if user_role == "admin":
-            st.info("💡 관리자 모드: 표를 직접 수정하고 아래 버튼을 눌러 저장하세요.")
-            edited_projects = st.data_editor(projects_df, use_container_width=True, num_rows="fixed")
+            st.info("💡 관리자 모드: 표를 수정하고 아래 버튼을 눌러 저장하세요. (위도/경도는 숨겨져 있습니다)")
+            
+            # [핵심] 위도와 경도는 데이터에는 있지만, 화면(Editor)에서는 보이지 않게 숨김 처리
+            column_configuration = {
+                "위도": None,
+                "경도": None,
+                "구조물 공정율": st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%"),
+                "전기 공정율": st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%"),
+                "안전 등급": st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"]),
+                "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
+            }
+            
+            edited_projects = st.data_editor(projects_df, column_config=column_configuration, use_container_width=True)
+            
             if st.button("💾 프로젝트 변경사항 구글 시트에 저장"):
-                if save_data_to__sheet(sheet, managers_df, edited_projects):
-                    st.success("✅ 저장되었습니다!")
+                if save_data_to_sheet(sheet, managers_df, edited_projects):
+                    st.success("✅ 모든 프로젝트 정보가 저장되었습니다!")
                     st.rerun()
         else:
-            st.dataframe(projects_df, use_container_width=True)
+            st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
+            # 조회자에게도 위도/경도는 숨겨서 보여줌
+            st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
     with tab4:
         st.subheader("👥 인력 정보 관리")
         if user_role == "admin":
-            edited_managers = st.data_editor(managers_df, num_rows="dynamic", use_container_width=True)
+            edited_managers = st.data_editor(managers_df, num_rows="dynamic", use_container_width=True, column_config={"상태": st.column_config.SelectboxColumn("상태", options=["공사중", "휴식중"])})
             if st.button("변경사항 구글 시트에 저장"):
                 if save_data_to_sheet(sheet, edited_managers, projects_df):
                     st.success("✅ 인력 정보가 저장되었습니다!")
                     st.rerun()
         else:
+            st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             st.dataframe(managers_df, use_container_width=True)
 
 else:
