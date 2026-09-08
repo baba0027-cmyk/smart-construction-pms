@@ -32,7 +32,8 @@ def fix_column_names(df):
         "예정 전기": ["예정 전기", "예정 전기 인원", "계획 전기", "예정 전기"],
         "누적 구조물": ["누적 구조물", "누적 구조물 인원", "실적 구조물", "누적 구조"],
         "누적 전기": ["누적 전기", "누적 전기 인원", "실적 전기", "누적 전기"],
-        "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"]
+        "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"],
+        "용량 (MW)": ["용량 (MW)", "용량(MW)", "MW", "용량", "규모"] # [추가] 효율성 계산을 위한 기준
     }
     
     new_columns = {}
@@ -87,10 +88,11 @@ def load_data_from_sheet():
         if not projects_df.empty:
             for col in ['공사 시작일', '종료일']:
                 if col in projects_df.columns: projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
-            for col in ["구조물 공정율", "전기 공정율"]:
+            for col in ["구조물 공정율", "전기 공정율", "용량 (MW)"]: # [추가] 용량 수치화
                 if col in projects_df.columns: projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
             
-            desired_order = ["현장", "소장", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
+            # [수정] 원하는 컬럼 순서에 '용량 (MW)' 추가
+            desired_order = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
             existing_cols = [col for col in desired_order if col in projects_df.columns]
             extra_cols = [col for col in projects_df.columns if col not in existing_cols]
             projects_df = projects_df[existing_cols + extra_cols]
@@ -158,30 +160,41 @@ if sheet:
     # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
         if not projects_df.empty:
-            st.subheader("📈 실시간 프로젝트 요약")
+            st.subheader("📈 핵심 생산성 지표 (Efficiency KPI)")
+            
+            # --- [수정] 생산성 계산 로직 ---
+            total_sites = len(projects_df)
+            
+            # 1. 평균 1MW당 공정일수 계산
+            # (모든 현장의 총 공사일수 합계) / (모든 현장의 총 용량 합계)
+            total_mw = projects_df['용량 (MW)'].sum()
+            if total_mw > 0:
+                # 기간 계산 (종료일 - 시작일)
+                total_days = (projects_df['종료일'] - projects_df['공사 시작일']).dt.days.sum()
+                avg_days_per_mw = total_days / total_mw
+                
+                # 2. 1MW당 평균 투입인원 계산
+                total_manpower = managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0
+                avg_manpower_per_mw = total_manpower / total_mw
+            else:
+                avg_days_per_mw = 0
+                avg_manpower_per_mw = 0
+
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric("총 현장 수", f"{len(projects_df)} 개")
-            kpi2.metric("평균 공정율", f"{projects_df[['구조물 공정율', '전기 공정율']].mean().mean():.1f}%")
-            
-            total_manpower = managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0
-            kpi3.metric("총 투입 인원", f"{int(total_manpower)} 명")
-            
+            kpi1.metric("총 현장 수", f"{total_sites} 개")
+            kpi2.metric("평균 1MW당 공정일수", f"{avg_days_per_mw:.1f} 일")
+            kpi3.metric("1MW당 평균 투입인원", f"{avg_manpower_per_mw:.1f} 명")
             kpi4.metric("위험 현장", f"{len(projects_df[projects_df['안전 등급'] == '위험'])} 개", delta_color="inverse")
 
             st.divider()
-            col_c1, col_c2 = st.columns(2)
-            with col_c1:
-                fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 현황 (%)")
-                st.plotly_chart(fig_bar, use_container_width=True)
-            with col_c2:
-                # [수정] 안전 등급 분포를 Pie $\rightarrow$ Bar 차트로 변경
-                safety_counts = projects_df['안전 등급'].value_counts().reset_index()
-                safety_counts.columns = ['안전 등급', '현장 수']
-                fig_bar_safety = px.bar(safety_counts, x='안전 등급', y='현장 수', 
-                                        color='안전 등급',
-                                        color_discrete_map={"정상": "green", "주의": "orange", "위험": "red"},
-                                        title="안전 등급 분포 (현장 수)")
-                st.plotly_chart(fig_bar_safety, use_container_width=True)
+            
+            # [수정] 안전 등급 분포를 빼고, 현장별 공정 현황만 전체 너비로 표시
+            st.subheader("📊 현장별 공정 진행 현황 (%)")
+            fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], 
+                             barmode="group", 
+                             title="현장별 구조물 vs 전기 공정율 비교",
+                             color_discrete_sequence=["#1f77b4", "#ff7f0e"])
+            st.plotly_chart(fig_bar, use_container_width=True)
 
     # --- [Tab 1] 지도/날씨 ---
     with tab1:
@@ -205,7 +218,6 @@ if sheet:
         missing_cols = [c for c in required_cols if c not in managers_df.columns]
         
         if not missing_cols:
-            # [수정] 데이터 구조 재편성: 비교를 위해 Pivot 형태로 변환
             melted_data = []
             for _, row in managers_df.iterrows():
                 site = row['현장']
@@ -215,13 +227,9 @@ if sheet:
                 melted_data.append({'현장': site, '공종': '전기', '구분': '누적(Actual)', '인원': row['누적 전기']})
             
             df_plot = pd.DataFrame(melted_data)
-            # 현장 + 공종을 하나의 X축 라벨로 만들기
             df_plot['X_Label'] = df_plot['현장'] + " (" + df_plot['공종'] + ")"
-            
-            # 비교를 위해 Pivot
             df_pivot = df_plot.pivot(index='X_Label', columns='구분', values='인원').reset_index()
             
-            # [핵심 로직] 누적이 계획보다 많으면 빨간색, 아니면 파란색
             actual_colors = []
             for _, row in df_pivot.iterrows():
                 if row['누적(Actual)'] > row['계획(Plan)']:
@@ -229,24 +237,9 @@ if sheet:
                 else:
                     actual_colors.append('#636EFA') # Blue
             
-            # Plotly Graph Objects로 커스텀 차트 생성
             fig_man = go.Figure()
-            
-            # 1. 계획(Plan) 막대 (연한 회색/파란색)
-            fig_man.add_trace(go.Bar(
-                x=df_pivot['X_Label'],
-                y=df_pivot['계획(Plan)'],
-                name='계획(Plan)',
-                marker_color='lightgrey'
-            ))
-            
-            # 2. 누적(Actual) 막대 (조건부 색상 적용)
-            fig_man.add_trace(go.Bar(
-                x=df_pivot['X_Label'],
-                y=df_pivot['누적(Actual)'],
-                name='누적(Actual)',
-                marker_color=actual_colors
-            ))
+            fig_man.add_trace(go.Bar(x=df_pivot['X_Label'], y=df_pivot['계획(Plan)'], name='계획(Plan)', marker_color='lightgrey'))
+            fig_man.add_trace(go.Bar(x=df_pivot['X_Label'], y=df_pivot['누적(Actual)'], name='누적(Actual)', marker_color=actual_colors))
             
             fig_man.update_layout(
                 barmode='group',
@@ -255,14 +248,11 @@ if sheet:
                 yaxis_title="인원 (명)",
                 legend_title="구분"
             )
-            
             st.plotly_chart(fig_man, use_container_width=True)
             st.write("**📋 상세 인력 투입 현황 데이터**")
             st.dataframe(managers_df[required_cols + (['총 인원'] if '총 인원' in managers_df.columns else [])], use_container_width=True)
         else:
             st.warning(f"⚠️ 필수 데이터가 부족합니다: **{', '.join(missing_cols)}**")
-            st.info("구글 시트 'managers' 탭의 헤더를 확인해 주세요.")
-            st.write("현재 인식된 컬럼:", list(managers_df.columns))
 
     # --- [Tab 3] 프로젝트 ---
     with tab3:
@@ -271,6 +261,7 @@ if sheet:
             column_config = {
                 "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
                 "전기 공정율": st.column_config.ProgressColumn("전기 %", min_value=0, max_value=100, format="%d%%"),
+                "용량 (MW)": st.column_config.NumberColumn("용량 (MW)", format="%.2f MW"), # [추가]
                 "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
@@ -311,7 +302,6 @@ if sheet:
         else:
             st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             st.dataframe(managers_df, use_container_width=True)
-            st.download_button("📥 엑셀 다운로드", export_to_excel(managers_df), "manpower.xlsx")
 
 else:
     st.error("구글 시트 연결 실패")
