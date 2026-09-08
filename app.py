@@ -92,7 +92,8 @@ def standardize_dataframe(df, schema):
     if "총 인원" in new_df.columns: new_df = calculate_managers_totals(new_df)
     return new_df
 
-# --- [NEW] Weather Engine ---
+# --- [UPDATED] Weather Engine with Caching ---
+@st.cache_data(ttl=600) # 10분 동안 날씨 데이터를 캐싱하여 속도 및 API 안정성 확보
 def fetch_weather_info(location="Seoul"):
     """wttr.in을 사용하여 실시간 날씨 정보를 가져옵니다."""
     try:
@@ -309,18 +310,58 @@ if sheet:
                         folium.Marker([float(row['위도']), float(row['경도'])], popup=str(row['현장'])).add_to(m)
                 except: pass
             st_folium(m, width=700, height=450)
+        
         with col2:
             st.subheader("🌦️ 실시간 날씨 정보")
-            # 첫 번째 프로젝트의 위치를 기준으로 날씨 가져오기
-            target_loc = projects_df.iloc[0]['위치'] if not projects_df.empty else "Seoul"
-            weather = fetch_weather_info(target_loc)
             
-            if weather:
-                st.metric(label=f"📍 {target_loc} 날씨", value=f"{weather['temp']}°C")
-                st.write(f"**상태:** {weather['desc']}")
-                st.write(f"**습도:** {weather['humidity']}%")
+            # --- [NEW] Weather System: Detail View ---
+            st.markdown("#### 🔍 현장별 상세 날씨")
+            weather_options = ["전체 요약 보기"] + projects_df['현장'].tolist()
+            selected_weather_site = st.selectbox("날씨를 확인할 현장을 선택하세요", weather_options)
+
+            if selected_weather_site == "전체 요약 보기":
+                st.info("아래 [현장별 날씨 요약] 섹션에서 모든 현장의 날씨를 확인할 수 있습니다.")
             else:
-                st.warning("날씨 정보를 가져올 수 없습니다. (연결 확인 필요)")
+                # Get the location and weather for the selected site
+                site_data = projects_df[projects_df['현장'] == selected_weather_site].iloc[0]
+                target_loc = site_data['위치'] if site_data['위치'] else "Seoul"
+                weather = fetch_weather_info(target_loc)
+                
+                if weather:
+                    st.metric(label=f"📍 {selected_weather_site}", value=f"{weather['temp']}°C")
+                    st.write(f"**상태:** {weather['desc']}")
+                    st.write(f"**습도:** {weather['humidity']}%")
+                else:
+                    st.warning(f"'{target_loc}'의 날씨 정보를 가져올 수 없습니다.")
+
+            st.divider()
+
+            # --- [NEW] Weather System: Summary View ---
+            st.markdown("#### 📋 현장별 날씨 요약")
+            if not projects_df.empty:
+                summary_list = []
+                # We use a loop to gather weather for all sites
+                # Thanks to @st.cache_data, this is very fast after the first load!
+                for _, row in projects_df.iterrows():
+                    loc = row['위치'] if row['위치'] else "Seoul"
+                    w = fetch_weather_info(loc)
+                    if w:
+                        summary_list.append({
+                            "현장명": row['현장'],
+                            "온도": f"{w['temp']}°C",
+                            "상태": w['desc']
+                        })
+                    else:
+                        summary_list.append({
+                            "현장명": row['현장'],
+                            "온도": "-",
+                            "상태": "정보 없음"
+                        })
+                
+                if summary_list:
+                    st.dataframe(pd.DataFrame(summary_list), hide_index=True, use_container_width=True)
+            else:
+                st.write("데이터가 없습니다.")
 
     # --- [Tab 2] 인력 비교 차트 ---
     with tab2:
@@ -350,7 +391,7 @@ if sheet:
             for _, r in df_ea.iterrows():
                 orig = managers_df[managers_df['현장'] == r['현장']]
                 ea_colors.append('#EF553B' if not orig.empty and r['인원'] > orig['예정 전기'].values[0] else '#636EFA')
-            fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors))
+            fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors)
 
             fig_man.update_layout(barmode='group', title="현장별 인력 투입 현황 (🔴 빨간색: 계획 초과!)", xaxis={'type': 'category'})
             st.plotly_chart(fig_man, use_container_width=True)
