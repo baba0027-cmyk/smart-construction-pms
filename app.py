@@ -33,7 +33,7 @@ def fix_column_names(df):
         "누적 구조물": ["누적 구조물", "누적 구조물 인원", "실적 구조물", "누적 구조"],
         "누적 전기": ["누적 전기", "누적 전기 인원", "실적 전기", "누적 전기"],
         "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"],
-        "용량 (MW)": ["용량 (MW)", "용량(MW)", "MW", "용량", "규모"] # [추가] 효율성 계산을 위한 기준
+        "용량 (MW)": ["용량 (MW)", "용량(MW)", "MW", "용량", "규모"] 
     }
     
     new_columns = {}
@@ -86,12 +86,17 @@ def load_data_from_sheet():
         projects_df = fix_column_names(projects_df)
         
         if not projects_df.empty:
+            # [중요] 데이터 타입 변환
             for col in ['공사 시작일', '종료일']:
                 if col in projects_df.columns: projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
-            for col in ["구조물 공정율", "전기 공정율", "용량 (MW)"]: # [추가] 용량 수치화
-                if col in projects_df.columns: projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
             
-            # [수정] 원하는 컬럼 순서에 '용량 (MW)' 추가
+            for col in ["구조물 공정율", "전기 공정율", "용량 (MW)"]:
+                if col in projects_df.columns:
+                    projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
+                else:
+                    # [방어적 코드] 컬럼이 없으면 에러 대신 0으로 채워진 컬럼을 생성하여 KeyError 방지
+                    projects_df[col] = 0.0
+            
             desired_order = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
             existing_cols = [col for col in desired_order if col in projects_df.columns]
             extra_cols = [col for col in projects_df.columns if col not in existing_cols]
@@ -162,12 +167,14 @@ if sheet:
         if not projects_df.empty:
             st.subheader("📈 핵심 생산성 지표 (Efficiency KPI)")
             
-            # --- [수정] 생산성 계산 로직 ---
+            # [안내 메시지] 용량 데이터가 없을 경우 사용자에게 알림
+            if projects_df['용량 (MW)'].sum() == 0:
+                st.info("💡 **Tip**: 현재 모든 현장의 용량이 0으로 표시됩니다. 정확한 생산성 지표를 위해 구글 시트 `projects` 탭에 **'용량'** 또는 **'MW'** 컬럼을 추가하고 값을 입력해 주세요!")
+
             total_sites = len(projects_df)
-            
-            # 1. 평균 1MW당 공정일수 계산
-            # (모든 현장의 총 공사일수 합계) / (모든 현장의 총 용량 합계)
             total_mw = projects_df['용량 (MW)'].sum()
+            
+            # 1. 평균 1MW당 공정일수 계산 (안전하게)
             if total_mw > 0:
                 # 기간 계산 (종료일 - 시작일)
                 total_days = (projects_df['종료일'] - projects_df['공사 시작일']).dt.days.sum()
@@ -188,7 +195,6 @@ if sheet:
 
             st.divider()
             
-            # [수정] 안전 등급 분포를 빼고, 현장별 공정 현황만 전체 너비로 표시
             st.subheader("📊 현장별 공정 진행 현황 (%)")
             fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], 
                              barmode="group", 
@@ -261,7 +267,7 @@ if sheet:
             column_config = {
                 "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
                 "전기 공정율": st.column_config.ProgressColumn("전기 %", min_value=0, max_value=100, format="%d%%"),
-                "용량 (MW)": st.column_config.NumberColumn("용량 (MW)", format="%.2f MW"), # [추가]
+                "용량 (MW)": st.column_config.NumberColumn("용량 (MW)", format="%.2f MW"),
                 "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
@@ -302,6 +308,7 @@ if sheet:
         else:
             st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             st.dataframe(managers_df, use_container_width=True)
+            st.download_button("📥 엑셀 다운로드", export_to_excel(managers_df), "manpower.xlsx")
 
 else:
     st.error("구글 시트 연결 실패")
