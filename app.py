@@ -13,14 +13,15 @@ import io
 
 # --- 0. [Master Schema] 우리 앱의 절대적인 데이터 표준 정의 ---
 PROJECTS_SCHEMA = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
-MANAGERS_SCHEMA = ["현장", "소장", "이름", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
+# [UPDATE] "이름" 컬럼 제거하여 관리 효율화
+MANAGERS_SCHEMA = ["현장", "소장", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
 
 # --- 1. [Engine] 컬럼 매핑 및 데이터 표준화 엔진 ---
 def fix_column_names(df):
     if df.empty: return df
     mapping = {
         "현장": ["현장", "현장명", "현장 이름", "현장명(명)", "대상현장"],
-        "소장": ["소장", "현장소장", "소장명", "담당자"],
+        "소장": ["소장", "현장소장", "소장명", "담당자", "이름", "성함", "성명"], # 이름/성함 등을 소장으로 통합 매핑
         "위치": ["위치", "현장위치", "지역"],
         "위도": ["위도", "lat", "latitude"],
         "경도": ["경도", "lon", "longitude"],
@@ -30,7 +31,6 @@ def fix_column_names(df):
         "공정": ["공정", "진행상태", "공정상태", "프로젝트상태"],
         "구조물 공정율": ["구조물 공정율", "구조물공정율", "구조물%", "구조물 공정"],
         "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
-        "이름": ["이름", "성함", "성명"],
         "예정 구조물": ["예정 구조물", "예정 구조물 인원", "계획 구조물", "예정 구조"],
         "예정 전기": ["예정 전기", "예정 전기 인원", "계획 전기", "예정 전기"],
         "누적 구조물": ["누적 구조물", "누적 구조물 인원", "실적 구조물", "누적 구조"],
@@ -79,6 +79,10 @@ def standardize_dataframe(df, schema):
     if "공사 시작일" in new_df.columns: new_df["공사 시작일"] = new_df["공사 시작일"].fillna(datetime.now())
     if "종료일" in new_df.columns: new_df["종료일"] = new_df["종료일"].fillna(datetime.now())
     
+    # [UPDATE] 데이터 로드 시점에 '총 인원' 자동 계산
+    if "총 인원" in new_df.columns:
+        new_df["총 인원"] = new_df["누적 구조물"] + new_df["누적 전기"]
+    
     return new_df
 
 # --- 2. 구글 시트 연결 ---
@@ -120,6 +124,10 @@ def load_data_from_sheet():
 # --- 4. 데이터 저장 (안전한 저장) ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
+        # [UPDATE] 저장 전 마지막으로 총 인원 재계산 보장
+        if "총 인원" in managers_df.columns:
+            managers_df["총 인원"] = managers_df["누적 구조물"] + managers_df["누적 전기"]
+
         m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
         p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
         
@@ -176,7 +184,7 @@ if sheet:
     if user_role == "admin":
         # [A] 신규 현장 등록
         with st.sidebar.expander("🚀 신규 현장 즉시 등록", expanded=False):
-            with st.form("quick_add_site_form", clear_on_submit=True): # clear_on_submit 추가로 중복 생성 방지
+            with st.form("quick_add_site_form", clear_on_submit=True):
                 new_site_name = st.text_input("📍 신규 현장명 *")
                 new_site_manager = st.text_input("👤 현장 소장")
                 new_site_mw = st.number_input("⚡ 용량 (MW)", min_value=0.0, step=0.1)
@@ -189,7 +197,6 @@ if sheet:
                     elif new_site_name in projects_df['현장'].values:
                         st.error("이미 존재하는 현장명입니다!")
                     else:
-                        # 마스터 스키마에 맞춰 데이터 생성
                         new_p_data = {col: "" for col in PROJECTS_SCHEMA}
                         new_p_data.update({
                             "현장": new_site_name, "소장": new_site_manager, "용량 (MW)": new_site_mw,
@@ -210,7 +217,7 @@ if sheet:
                             st.success(f"✅ '{new_site_name}' 생성 완료!")
                             st.rerun()
 
-        # [B] 현장 삭제 기능 (신규 추가됨)
+        # [B] 현장 삭제 기능
         with st.sidebar.expander("🗑️ 현장 삭제 (관리자용)", expanded=False):
             if not projects_df.empty:
                 site_to_delete = st.selectbox("삭제할 현장 선택", projects_df['현장'].tolist(), key="delete_site_sel")
@@ -219,7 +226,6 @@ if sheet:
                 
                 if st.button("🚨 현장 삭제 실행", key="btn_delete_exec"):
                     if confirm_delete:
-                        # 데이터 필터링 (해당 현장 제외)
                         updated_p = projects_df[projects_df['현장'] != site_to_delete]
                         updated_m = managers_df[managers_df['현장'] != site_to_delete]
                         
@@ -310,10 +316,12 @@ if sheet:
                     "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d"),
                     "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d"),
                     "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
-                    "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d")
+                    "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d", disabled=True) # [UPDATE] 읽기 전용
                 }
+                # [UPDATE] 편집 후 자동 계산 로직 적용
                 edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
                 if st.button("💾 변경사항 저장", key="btn_save_tab2"):
+                    edited_m["총 인원"] = edited_m["누적 구조물"] + edited_m["누적 전기"] # 자동 계산
                     if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
             else:
                 st.dataframe(managers_df, use_container_width=True)
@@ -340,21 +348,19 @@ if sheet:
     with tab4:
         st.subheader("👥 전체 인력/자원 관리")
         if user_role == "admin":
-            if '이름' in managers_df.columns and managers_df['이름'].nunique() > len(managers_df):
-                st.info("💡 [소장님 개인별 관리 모드]")
-                st.data_editor(managers_df, use_container_width=True, key="editor_tab4_mgr")
-            else:
-                st.info("💡 [현장별 인력 투입 관리 모드]")
-                col_config = {
-                    "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d"),
-                    "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d"),
-                    "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d"),
-                    "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
-                    "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d")
-                }
-                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
-                if st.button("💾 저장", key="btn_save_tab4"):
-                    if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
+            st.info("💡 [현장별 인력 투입 관리 모드]")
+            col_config = {
+                "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d"),
+                "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d"),
+                "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d"),
+                "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
+                "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d", disabled=True) # [UPDATE] 읽기 전용
+            }
+            # [UPDATE] 편집 후 자동 계산 로직 적용
+            edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
+            if st.button("💾 저장", key="btn_save_tab4"):
+                edited_m["총 인원"] = edited_m["누적 구조물"] + edited_m["누적 전기"] # 자동 계산
+                if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
         else:
             st.dataframe(managers_df, use_container_width=True)
 
