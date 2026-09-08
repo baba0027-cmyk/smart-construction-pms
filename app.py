@@ -314,7 +314,7 @@ if sheet:
         with col2:
             st.subheader("🌦️ 실시간 날씨 정보")
             
-            # --- [NEW] Weather System: Detail View ---
+            # --- [UPDATED] Weather System: Detail View ---
             st.markdown("#### 🔍 현장별 상세 날씨")
             weather_options = ["전체 요약 보기"] + projects_df['현장'].tolist()
             selected_weather_site = st.selectbox("날씨를 확인할 현장을 선택하세요", weather_options)
@@ -336,7 +336,7 @@ if sheet:
 
             st.divider()
 
-            # --- [NEW] Weather System: Summary View ---
+            # --- [UPDATED] Weather System: Summary View ---
             st.markdown("#### 📋 현장별 날씨 요약")
             if not projects_df.empty:
                 summary_list = []
@@ -391,7 +391,8 @@ if sheet:
             for _, r in df_ea.iterrows():
                 orig = managers_df[managers_df['현장'] == r['현장']]
                 ea_colors.append('#EF553B' if not orig.empty and r['인원'] > orig['예정 전기'].values[0] else '#636EFA')
-            fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors)
+            # FIXED: Added missing closing parenthesis below
+            fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors))
 
             fig_man.update_layout(barmode='group', title="현장별 인력 투입 현황 (🔴 빨간색: 계획 초과!)", xaxis={'type': 'category'})
             st.plotly_chart(fig_man, use_container_width=True)
