@@ -38,7 +38,7 @@ def fix_column_names(df):
     
     new_columns = {}
     for col in df.columns:
-        clean_col = col.strip()
+        clean_col = str(col).strip()
         found = False
         for standard_name, aliases in mapping.items():
             if clean_col in aliases:
@@ -69,32 +69,57 @@ def connect_to_gsheets():
         st.error(f"연결 실패: {e}")
         return None
 
-# --- 2. 데이터 로드 ---
+# --- 2. 데이터 로드 (무적의 방어 로직 적용) ---
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
     sheet = connect_to_gsheets()
     if sheet is None: return pd.DataFrame(), pd.DataFrame()
     try:
+        # [1] Managers 데이터 로드 및 보정
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = fix_column_names(managers_df)
+        
+        # 필수 인력 컬럼 강제 생성 (없으면 0으로 채움)
         manpower_cols = ["예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
         for col in manpower_cols:
-            if col in managers_df.columns:
+            if col not in managers_df.columns:
+                managers_df[col] = 0
+            else:
                 managers_df[col] = pd.to_numeric(managers_df[col], errors='coerce').fillna(0)
         
+        # [2] Projects 데이터 로드 및 보정
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = fix_column_names(projects_df)
         
         if not projects_df.empty:
-            for col in ['공사 시작일', '종료일']:
-                if col in projects_df.columns: projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
+            # 필수 프로젝트 컬럼 강제 생성 (없으면 기본값으로 채움)
+            essential_proj_cols = {
+                "현장": "미지정 현장",
+                "소장": "미지정 소장",
+                "용량 (MW)": 0.0,
+                "안전 등급": "정상",
+                "공정": "준비 중",
+                "구조물 공정율": 0.0,
+                "전기 공정율": 0.0,
+                "공사 시작일": datetime.now(),
+                "종료일": datetime.now(),
+                "위도": 36.5,
+                "경도": 127.5
+            }
             
-            for col in ["구조물 공정율", "전기 공정율", "용량 (MW)"]:
-                if col in projects_df.columns:
-                    projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
+            for col, default_val in essential_proj_cols.items():
+                if col not in projects_df.columns:
+                    projects_df[col] = default_val
                 else:
-                    projects_df[col] = 0.0
-            
+                    # 데이터 타입 변환
+                    if col in ['공사 시작일', '종료일']:
+                        projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce').fillna(datetime.now())
+                    elif isinstance(default_val, (int, float)):
+                        projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(default_val)
+                    else:
+                        projects_df[col] = projects_df[col].fillna(default_val)
+
+            # 컬럼 순서 정리
             desired_order = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
             existing_cols = [col for col in desired_order if col in projects_df.columns]
             extra_cols = [col for col in projects_df.columns if col not in existing_cols]
@@ -126,7 +151,7 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
 # --- 4. 권한 관리 ---
 def handle_auth():
     st.sidebar.title("🔐 접속 권한")
-    auth_mode = st.sidebar.radio("접속 모드를를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
+    auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
     user_role = "viewer"
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password")
@@ -155,8 +180,12 @@ if sheet:
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
     if not projects_df.empty:
-        high_risk = projects_df[projects_df['안전 등급'] == '위험']['현장'].tolist()
-        if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
+        # [방어적 접근] 데이터가 없어도 에러가 나지 않도록 safety check 적용
+        high_risk_mask = projects_df['안전 등급'].astype(str) == '위험'
+        high_risk = projects_df[high_risk_mask]['현장'].tolist()
+        
+        if high_risk: 
+            st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
     tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교 (Plan vs Act)", "📋 프로젝트", "👥 인력/자원 관리"])
 
@@ -165,11 +194,10 @@ if sheet:
         if not projects_df.empty:
             st.subheader("📈 핵심 현황 지표 (Summary)")
             
-            # [수정] 사용자 요청에 따른 직관적 KPI 구성
             total_sites = len(projects_df)
             total_mw = projects_df['용량 (MW)'].sum()
             total_manpower = managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0
-            high_risk_count = len(projects_df[projects_df['안전 등급'] == '위험'])
+            high_risk_count = len(projects_df[projects_df['안전 등급'].astype(str) == '위험'])
 
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
             kpi1.metric("총 현장 수", f"{total_sites} 개")
@@ -192,8 +220,11 @@ if sheet:
         with col1:
             m = folium.Map(location=[36.5, 127.5], zoom_start=7)
             for _, row in projects_df.iterrows():
-                if '위도' in row and '경도' in row and pd.notnull(row['위도']):
-                    folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장']).add_to(m)
+                try:
+                    if pd.notnull(row['위도']) and pd.notnull(row['경도']):
+                        folium.Marker([float(row['위도']), float(row['경도'])], popup=str(row['현장'])).add_to(m)
+                except:
+                    pass
             st_folium(m, width=700, height=450)
         with col2:
             st.subheader("🌦️ 지역별 날씨")
@@ -217,7 +248,7 @@ if sheet:
                 melted_data.append({'현장': site, '공종': '전기', '구분': '누적(Actual)', '인원': row['누적 전기']})
             
             df_plot = pd.DataFrame(melted_data)
-            df_plot['X_Label'] = df_plot['현장'] + " (" + df_plot['공종'] + ")"
+            df_plot['X_Label'] = df_plot['현장'].astype(str) + " (" + df_plot['공종'] + ")"
             df_pivot = df_plot.pivot(index='X_Label', columns='구분', values='인원').reset_index()
             
             actual_colors = []
