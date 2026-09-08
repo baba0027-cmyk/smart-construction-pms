@@ -6,16 +6,16 @@ import folium
 from streamlit_folium import st_folium
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import json
+import json  # JSON 처리를 위해 추가되었습니다.
 
 # --- 1. 구글 시트 연결 설정 (로컬 & 클라우드 하이브리드 방식) ---
 def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # [핵심] 클라우드 환경(Secrets)인지 로컬 환경(File)인지 자동으로 판단합니다.
-        if "gcp_service_account" in st.secrets:
-            # 1. 클라우드 보안 금고(Secrets)에서 정보를 가져올 때
-            creds_dict = st.secrets["gcp_service_account"]
+        # [수정됨] 클라우드 환경(Secrets)에서 JSON 문자열을 직접 읽어옵니다.
+        if "gcp_json" in st.secrets:
+            # 1. 클라우드 보안 금고(Secrets)에서 JSON 문자열을 가져와 딕셔너리로 변환
+            creds_dict = json.loads(st.secrets["gcp_json"])
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
             # 2. 내 컴퓨터의 credentials.json 파일을 사용할 때 (로컬 테스트용)
@@ -26,9 +26,10 @@ def connect_to_gsheets():
         return sheet
     except Exception as e:
         st.error(f"구글 시트 연결 실패! 원인: {e}")
-        st.info("💡 해결 팁: 클라우드 배포 시에는 Streamlit Cloud의 'Secrets' 설정에 인증 정보가 입력되어 있어야 합니다.")
+        st.info("💡 해결 팁: 클라우드 배포 시에는 Streamlit Cloud의 'Secrets' 설정에 'gcp_json' 항목으로 JSON 내용을 넣어주세요.")
         return None
 
+# (이하 코드는 이전과 동일합니다...)
 # --- 2. 데이터 로드 함수 ---
 def load_data(sheet):
     managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
