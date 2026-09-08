@@ -105,40 +105,49 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
         st.error(f"저장 실패: {e}")
         return False
 
-# --- 4. 메인 앱 실행 ---
+# --- 4. [복구] 권한 관리 로직 ---
+def handle_auth():
+    st.sidebar.title("🔐 접속 권한")
+    auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
+    user_role = "viewer"
+    
+    if auth_mode == "관리자 (수정/관리용)":
+        password = st.sidebar.text_input("관리자 비밀번호", type="password")
+        admin_pw = st.secrets.get("ADMIN_PW", "1931")
+        if password == admin_pw:
+            user_role = "admin"
+            st.sidebar.success("✅ 관리자 모드 활성화")
+        elif password != "":
+            st.sidebar.error("❌ 비밀번호가 틀렸습니다.")
+    return user_role
+
+# --- 5. 메인 앱 실행 ---
 st.set_page_config(page_title="스마트 건설 PMS Pro", layout="wide")
 st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
-user_role = "viewer" # 단순화를 위해 기본 viewer로 설정 (필요시 권한 로직 추가)
+# [복구] 권한 관리 호출
+user_role = handle_auth()
 sheet = connect_to_gsheets()
 
 if sheet:
     managers_df, projects_df = load_data_from_sheet()
 
-    # --- [디버그 섹션] 사용자가 확인용 ---
-    with st.expander("🔍 시스템 상태 진단 (문제가 있다면 클릭하세요)"):
-        st.write("**현재 감지된 Managers 컬럼:**", list(managers_df.columns))
-        if '이름' in managers_df.columns:
-            st.success("✅ [모드: 소장님 관리 모드]로 동작 중입니다.")
-        elif '현장' in managers_df.columns:
-            st.success("✅ [모드: 현장별 인력 투입 모드]로 동작 중입니다.")
-        else:
-            st.warning("⚠️ [경고] '이름' 또는 '현장' 컬럼을 찾을 수 없습니다. 구글 시트의 헤더를 확인하세요!")
-        
-        if st.button("🧹 캐시 강제 초기화 (Clear Cache)"):
-            st.cache_data.clear()
-            st.rerun()
-
     # --- 탭 구성 ---
-    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ 지도/날씨", "👷 작업현황", "📋 프로젝트", "👥 인력관리"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ 지도/날씨", "👷 작업현황", "📋 프로젝트", "👥 인력/자원 관리"])
 
     with tab1:
-        st.subheader("📍 현장 위치")
-        m = folium.Map(location=[36.5, 127.5], zoom_start=7)
-        for _, row in projects_df.iterrows():
-            if '위도' in row and '경도' in row and pd.notnull(row['위도']):
-                folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장명']).add_to(m)
-        st_folium(m, width=700, height=400)
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.subheader("📍 현장 위치")
+            m = folium.Map(location=[36.5, 127.5], zoom_start=7)
+            for _, row in projects_df.iterrows():
+                if '위도' in row and '경도' in row and pd.notnull(row['위도']):
+                    folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장명']).add_to(m)
+            st_folium(m, width=700, height=400)
+        with col2:
+            st.subheader("🌦️ 지역별 날씨")
+            weather_data = {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람", "울산": "☀️ 맑음", "대전": "☁️ 흐림", "제주": "🌦️ 비", "세종": "☀️ 맑음", "창원": "☀️ 맑음"}
+            for city, w in weather_data.items(): st.write(f"**{city}**: {w}")
 
     with tab2:
         # [스키마 적응형] 작업현황 탭
@@ -164,20 +173,45 @@ if sheet:
 
     with tab3:
         st.subheader("📋 프로젝트 정보")
-        st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
+        if user_role == "admin":
+            st.info("💡 관리자 모드: 표를 수정하고 아래 버튼을 눌러 저장하세요.")
+            column_configuration = {
+                "위도": None, "경도": None,
+                "구조물 공정율": st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%"),
+                "전기 공정율": st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%"),
+                "안전 등급": st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"]),
+                "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
+            }
+            edited_projects = st.data_editor(projects_df, column_config=column_configuration, use_container_width=True)
+            if st.button("💾 프로젝트 변경사항 저장"):
+                if save_data_to_sheet(sheet, managers_df, edited_projects):
+                    st.success("✅ 저장 완료!")
+                    st.rerun()
+        else:
+            display_df = projects_df.drop(columns=['위도', '경도'], errors='ignore')
+            st.dataframe(display_df, use_container_width=True)
 
     with tab4:
         st.subheader("👥 인력/자원 관리")
-        # [스키마 적응형] 인력관리 탭
-        if '이름' in managers_df.columns:
-            st.info("💡 [소장님 개인별 관리 모드]")
-            st.data_editor(managers_df, use_container_width=True)
+        if user_role == "admin":
+            if '이름' in managers_df.columns:
+                st.info("💡 [소장님 개인별 관리 모드]")
+                st.data_editor(managers_df, use_container_width=True)
+            else:
+                st.info("💡 [현장별 인력 투입 계획 모드]")
+                col_config = {}
+                if '용량' in managers_df.columns: col_config['용량'] = st.column_config.NumberColumn("용량", format="%d 명")
+                if '투입인원' in managers_df.columns: col_config['투입인원'] = st.column_config.NumberColumn("투입인원", format="%d 명")
+                if '근무일수' in managers_df.columns: col_config['근무일수'] = st.column_config.NumberColumn("근무일수", format="%d 일")
+                
+                edited_managers = st.data_editor(managers_df, use_container_width=True, column_config=col_config)
+                if st.button("변경사항 구글 시트에 저장"):
+                    if save_data_to_sheet(sheet, edited_managers, projects_df):
+                        st.success("✅ 인력 계획이 저장되었습니다!")
+                        st.rerun()
         else:
-            st.info("💡 [현장별 인력 투입 계획 모드]")
-            col_config = {}
-            if '용량' in managers_df.columns: col_config['용량'] = st.column_config.NumberColumn("용량", format="%d 명")
-            if '투입인원' in managers_df.columns: col_config['투입인원'] = st.column_config.NumberColumn("투입인원", format="%d 명")
-            st.data_editor(managers_df, use_container_width=True, column_config=col_config)
+            st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
+            st.dataframe(managers_df, use_container_width=True)
 
 else:
     st.error("구글 시트 연결 실패")
