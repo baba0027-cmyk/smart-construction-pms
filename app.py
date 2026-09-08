@@ -113,18 +113,29 @@ def load_data_from_sheet():
         st.error(f"로드 오류: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# --- 3. 데이터 저장 ---
+# --- 3. 데이터 저장 (NaN 해결 핵심 로직) ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
+        # [핵심] NaN(Not a Number)을 None(JSON null)으로 변환하여 저장 에러 방지
+        # .astype(object)를 사용해야 None을 데이터프레임에 넣을 수 있습니다.
+        m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
+        p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
+        
+        # Projects 날짜 형식 처리 (None이 포함된 상태에서 문자열 변환)
+        for col in ['공사 시작일', '종료일']:
+            if col in p_clean.columns:
+                p_clean[col] = p_clean[col].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (datetime, pd.Timestamp)) else x)
+
+        # 1. Managers 저장
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
-        ws_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
+        ws_m.update([m_clean.columns.tolist()] + m_clean.values.tolist())
+        
+        # 2. Projects 저장
         ws_p = sheet.worksheet("projects")
         ws_p.clear()
-        projects_copy = projects_df.copy()
-        for col in ['공사 시작일', '종료일']:
-            if col in projects_copy.columns: projects_copy[col] = projects_copy[col].dt.strftime('%Y-%m-%d')
-        ws_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
+        ws_p.update([p_clean.columns.tolist()] + p_clean.values.tolist())
+        
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -162,7 +173,7 @@ if sheet:
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
-    # --- [Sidebar] 관리자 전용 신규 현장 등록 기능 (핵심!) ---
+    # --- [Sidebar] 관리자 전용 신규 현장 등록 기능 (NaN 방지 로직 추가) ---
     if user_role == "admin":
         with st.sidebar.expander("🚀 신규 현장 즉시 등록 (동기화)", expanded=True):
             st.info("현장명만 입력해도 [프로젝트]와 [인력관리] 시트에 동시에 생성됩니다.")
@@ -178,8 +189,9 @@ if sheet:
                     if not new_site_name:
                         st.error("현장명은 반드시 입력해야 합니다!")
                     else:
-                        # 1. Projects용 새 데이터 생성
-                        new_p_row = {
+                        # 1. Projects용 새 데이터 생성 (기존 컬럼 구조 유지)
+                        new_p_row = {col: "" for col in projects_df.columns} # 모든 컬럼 초기화
+                        new_p_row.update({
                             "현장": new_site_name,
                             "소장": new_site_manager,
                             "용량 (MW)": new_site_mw,
@@ -192,9 +204,11 @@ if sheet:
                             "종료일": datetime.now(),
                             "위도": 36.5,
                             "경도": 127.5
-                        }
-                        # 2. Managers용 새 데이터 생성 (차트 깨짐 방지를 위해 인력값 0으로 자동 생성)
-                        new_m_row = {
+                        })
+                        
+                        # 2. Managers용 새 데이터 생성 (기존 컬럼 구조 유지)
+                        new_m_row = {col: 0 for col in managers_df.columns} # 모든 컬럼 초기화
+                        new_m_row.update({
                             "현장": new_site_name,
                             "소장": new_site_manager,
                             "예정 구조물": 0,
@@ -202,7 +216,7 @@ if sheet:
                             "누적 구조물": 0,
                             "누적 전기": 0,
                             "총 인원": 0
-                        }
+                        })
                         
                         # 데이터 합치기
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_row])], ignore_index=True)
@@ -258,7 +272,7 @@ if sheet:
             st.subheader("🌦️ 지역별 날씨")
             st.write("☀️ 서울: 맑음")
 
-    # --- [Tab 2] 인력 투입 비교 (현장명 중심 & 그룹화) ---
+    # --- [Tab 2] 인력 투입 비교 ---
     with tab2:
         st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         
@@ -345,7 +359,7 @@ if sheet:
     with tab3:
         st.subheader("📋 프로젝트 상세 정보")
         if user_role == "admin":
-            st.info("💡 표 하단의 '+' 버튼을 눌러 새 현장을 추가할 수 있습니다. (단, 인력 데이터는 사이드바 '신규 현장 즉시 등록' 사용 권장)")
+            st.info("💡 표 하단의 '+' 버튼을 눌러 새 현장을 추가할 수 있습니다.")
             column_config = {
                 "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
                 "전기 공정율": st.column_config.ProgressColumn("전기 %", min_value=0, max_value=100, format="%d%%"),
