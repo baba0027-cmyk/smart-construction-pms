@@ -10,6 +10,13 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import io
+import requests  # 날씨 호출용
+try:
+    from geopy.geocoders import Nominatim # 주소 변환용
+    from geopy.extra.rate_limiter import RateLimiter
+    HAS_GEOPY = True
+except ImportError:
+    HAS_GEOPY = False
 
 # --- 0. [Master Schema] ---
 PROJECTS_SCHEMA = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
@@ -84,6 +91,51 @@ def standardize_dataframe(df, schema):
     if "종료일" in new_df.columns: new_df["종료일"] = new_df["종료일"].fillna(datetime.now())
     if "총 인원" in new_df.columns: new_df = calculate_managers_totals(new_df)
     return new_df
+
+# --- [NEW] Weather Engine ---
+def fetch_weather_info(location="Seoul"):
+    """wttr.in을 사용하여 실시간 날씨 정보를 가져옵니다."""
+    try:
+        # wttr.in API 호출 (JSON 형식)
+        url = f"https://wttr.in/{location}?format=j1"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            curr = data['current_condition'][0]
+            temp = curr['temp_C']
+            desc = curr['weatherDesc'][0]['value']
+            humidity = curr['humidity']
+            return {"temp": temp, "desc": desc, "humidity": humidity}
+        else:
+            return None
+    except:
+        return None
+
+# --- [NEW] Geocoding Engine ---
+def geocode_all_addresses(df):
+    """주소 컬럼을 바탕으로 위도/경도를 자동으로 찾아 업데이트합니다."""
+    if not HAS_GEOPY:
+        return df, "⚠️ geopy 라이브러리가 설치되지 않았습니다. (pip install geopy)"
+    
+    new_df = df.copy()
+    geolocator = Nominatim(user_agent="construction_pms_agent")
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+    
+    updated_count = 0
+    for idx, row in new_df.iterrows():
+        addr = row['위치']
+        if addr and pd.notnull(addr):
+            try:
+                location = geocode(addr)
+                if location:
+                    new_df.at[idx, '위도'] = location.latitude
+                    new_df.at[idx, '경도'] = location.longitude
+                    updated_count += 1
+            except:
+                continue
+    
+    msg = f"✅ {updated_count}개 현장의 위치를 업데이트했습니다!" if updated_count > 0 else "❌ 변경된 주소를 찾을 수 없습니다."
+    return new_df, msg
 
 # --- 2. 구글 시트 연결 ---
 @st.cache_resource
@@ -167,10 +219,20 @@ st.set_page_config(page_title="스마트 건설 PMS Pro", layout="wide")
 
 sheet = connect_to_gsheets()
 if sheet:
+    # Session State management for Project Master to allow Geocoding flow
+    if 'master_p_df' not in st.session_state:
+        _, projects_df = load_data_from_sheet()
+        st.session_state.master_p_df = projects_df
+
     managers_df, projects_df = load_data_from_sheet()
+    # Sync session state with loaded data if it's the first load
+    if 'master_p_df' in st.session_state and st.session_state.master_p_df.empty:
+        st.session_state.master_p_df = projects_df
+
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
+    # --- [Sidebar] 관리자 전용 기능 ---
     if user_role == "admin":
         with st.sidebar.expander("🚀 신규 현장 즉시 등록", expanded=False):
             with st.form("quick_add_site_form", clear_on_submit=True):
@@ -190,7 +252,10 @@ if sheet:
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_data])], ignore_index=True)
                         updated_m = pd.concat([managers_df, pd.DataFrame([new_m_data])], ignore_index=True)
                         updated_m = calculate_managers_totals(updated_m)
-                        if save_data_to_sheet(sheet, updated_m, updated_p): st.success(f"✅ '{new_site_name}' 생성 완료!"); st.rerun()
+                        if save_data_to_sheet(sheet, updated_m, updated_p): 
+                            st.success(f"✅ '{new_site_name}' 생성 완료!"); 
+                            st.session_state.master_p_df = updated_p
+                            st.rerun()
 
         with st.sidebar.expander("🗑️ 현장 삭제 (관리자용)", expanded=False):
             if not projects_df.empty:
@@ -201,18 +266,24 @@ if sheet:
                     if confirm_delete:
                         updated_p = projects_df[projects_df['현장'] != site_to_delete]
                         updated_m = managers_df[managers_df['현장'] != site_to_delete]
-                        if save_data_to_sheet(sheet, updated_m, updated_p): st.error(f"✅ '{site_to_delete}' 현장이 삭제되었습니다!"); st.rerun()
+                        if save_data_to_sheet(sheet, updated_m, updated_p): 
+                            st.error(f"✅ '{site_to_delete}' 현장이 삭제되었습니다!"); 
+                            st.session_state.master_p_df = updated_p
+                            st.rerun()
                     else: st.info("⚠️ 삭제를 확정하려면 체크박스를 선택해주세요.")
             else: st.info("삭제할 현장이 없습니다.")
 
+    # --- 상단 알림 ---
     if not projects_df.empty:
         high_risk = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
+    # [Tabs Configuration]
     tab_dash, tab1, tab2, tab_progress, tab3, tab4 = st.tabs([
         "📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교", "📈 공정율 관리", "📋 프로젝트 마스터", "👥 인력/자원 관리"
     ])
 
+    # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
         if not projects_df.empty:
             st.subheader("📈 핵심 현황 지표 (Summary)")
@@ -221,11 +292,13 @@ if sheet:
             kpi2.metric("총 용량 (MW)", f"{projects_df['용량 (MW)'].sum():.1f} MW")
             kpi3.metric("총 투입 인원", f"{managers_df['총 인원'].sum():.0f} 명")
             kpi4.metric("위험 현장", f"{len(projects_df[projects_df['안전 등급'].astype(str) == '위험'])} 개", delta_color="inverse")
+            
             st.divider()
             st.subheader("📊 현장별 공정 진행 현황 (%)")
             fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 구조물 vs 전기 공정율 비교", color_discrete_sequence=["#1f77b4", "#ff7f0e"])
             st.plotly_chart(fig_bar, use_container_width=True)
 
+    # --- [Tab 1] 지도 & 날씨 ---
     with tab1:
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -237,9 +310,19 @@ if sheet:
                 except: pass
             st_folium(m, width=700, height=450)
         with col2:
-            st.subheader("🌦️ 지역별 날씨")
-            st.write("☀️ 서울: 맑음")
+            st.subheader("🌦️ 실시간 날씨 정보")
+            # 첫 번째 프로젝트의 위치를 기준으로 날씨 가져오기
+            target_loc = projects_df.iloc[0]['위치'] if not projects_df.empty else "Seoul"
+            weather = fetch_weather_info(target_loc)
+            
+            if weather:
+                st.metric(label=f"📍 {target_loc} 날씨", value=f"{weather['temp']}°C")
+                st.write(f"**상태:** {weather['desc']}")
+                st.write(f"**습도:** {weather['humidity']}%")
+            else:
+                st.warning("날씨 정보를 가져올 수 없습니다. (연결 확인 필요)")
 
+    # --- [Tab 2] 인력 비교 차트 ---
     with tab2:
         st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         if not managers_df.empty:
@@ -268,6 +351,7 @@ if sheet:
                 orig = managers_df[managers_df['현장'] == r['현장']]
                 ea_colors.append('#EF553B' if not orig.empty and r['인원'] > orig['예정 전기'].values[0] else '#636EFA')
             fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors))
+
             fig_man.update_layout(barmode='group', title="현장별 인력 투입 현황 (🔴 빨간색: 계획 초과!)", xaxis={'type': 'category'})
             st.plotly_chart(fig_man, use_container_width=True)
 
@@ -287,9 +371,11 @@ if sheet:
             else:
                 st.dataframe(managers_df, use_container_width=True)
 
+    # --- [Tab 3] 프로젝트 마스터 (기초 정보 수정용) ---
     with tab3:
         st.subheader("📋 프로젝트 마스터 정보")
         st.info("💡 현장 위치, 용량, 안전 등급 등 프로젝트의 기초 정보를 수정합니다.")
+        
         if user_role == "admin":
             col_config = {
                 "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
@@ -298,14 +384,33 @@ if sheet:
                 "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
-            edited_p = st.data_editor(projects_df, column_config=col_config, use_container_width=True, key="editor_tab3")
-            if st.button("💾 프로젝트 마스터 저장", key="btn_save_tab3"):
-                if save_data_to_sheet(sheet, managers_df, edited_p): st.success("✅ 저장 완료!"); st.rerun()
-            st.download_button("📥 엑셀 다운로드", export_to_excel(projects_df), "projects.xlsx", key="btn_dl_excel")
+            
+            # Data Editor
+            edited_p = st.data_editor(st.session_state.master_p_df, column_config=col_config, use_container_width=True, key="editor_tab3")
+            
+            # Geocoding Button
+            col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+            with col_btn1:
+                if st.button("📍 위경도 자동 변환", key="btn_geocode"):
+                    with st.spinner("주소를 검색하고 있습니다... (약 1~2초 소요)"):
+                        updated_p, msg = geocode_all_addresses(edited_p)
+                        st.session_state.master_p_df = updated_p
+                        st.success(msg)
+                        st.rerun()
+            
+            with col_btn2:
+                if st.button("💾 마스터 저장", key="btn_save_tab3"):
+                    if save_data_to_sheet(sheet, managers_df, edited_p): 
+                        st.session_state.master_p_df = edited_p
+                        st.success("✅ 저장 완료!"); 
+                        st.rerun()
+            
+            with col_btn3:
+                st.download_button("📥 엑셀 다운로드", export_to_excel(edited_p), "projects.xlsx", key="btn_dl_excel")
         else:
             st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
-    # --- [NEW/IMPROVED] [Tab 4] 공정율 관리 (Quick Update) ---
+    # --- [Tab 4] 공정율 관리 (Quick Update) ---
     with tab_progress:
         st.subheader("📈 공정율 관리")
         
@@ -317,7 +422,6 @@ if sheet:
             selected_site = st.selectbox("📍 업데이트할 현장을 선택하세요", projects_df['현장'].tolist(), key="slider_site_sel")
             
             if selected_site:
-                # 선택된 현장의 데이터 가져오기
                 site_idx = projects_df[projects_df['현장'] == selected_site].index[0]
                 current_row = projects_df.loc[site_idx]
                 
@@ -329,15 +433,12 @@ if sheet:
                     new_elec_prog = st.slider("⚡ 전기 공정율 (%)", 0, 100, int(current_row['전기 공정율']))
                 
                 if st.button(f"✅ '{selected_site}' 정보 업데이트", key="btn_update_slider"):
-                    # 데이터 업데이트
                     updated_p = projects_df.copy()
                     updated_p.at[site_idx, '구조물 공정율'] = float(new_struct_prog)
                     updated_p.at[site_idx, '전기 공정율'] = float(new_elec_prog)
                     updated_p.at[site_idx, '공정'] = new_status
-                    
                     if save_data_to_sheet(sheet, managers_df, updated_p):
-                        st.success(f"✅ '{selected_site}' 업데이트 완료!")
-                        st.rerun()
+                        st.success(f"✅ '{selected_site}' 업데이트 완료!"); st.rerun()
 
             st.divider()
             
@@ -359,8 +460,7 @@ if sheet:
             )
             if st.button("💾 일괄 변경사항 저장", key="btn_save_prog"):
                 if save_data_to_sheet(sheet, managers_df, edited_prog):
-                    st.success("✅ 일괄 업데이트 완료!")
-                    st.rerun()
+                    st.success("✅ 일괄 업데이트 완료!"); st.rerun()
         else:
             st.dataframe(projects_df[["현장", "공정", "구조물 공정율", "전기 공정율"]], use_container_width=True)
 
