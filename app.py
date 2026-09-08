@@ -97,7 +97,6 @@ def standardize_dataframe(df, schema):
 def fetch_weather_info(location="Seoul"):
     """wttr.in을 사용하여 실시간 날씨 정보를 가져옵니다."""
     try:
-        # wttr.in API 호출 (JSON 형식)
         url = f"https://wttr.in/{location}?format=j1"
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -114,7 +113,6 @@ def fetch_weather_info(location="Seoul"):
 
 # --- [NEW] Geocoding Engine ---
 def geocode_all_addresses(df):
-    """주소 컬럼을 바탕으로 위도/경도를 자동으로 찾아 업데이트합니다."""
     if not HAS_GEOPY:
         return df, "⚠️ geopy 라이브러리가 설치되지 않았습니다. (pip install geopy)"
     
@@ -216,7 +214,7 @@ def export_to_excel(df):
     return output.getvalue()
 
 # --- 7. 메인 앱 ---
-st.set_page_config(page_title="스마트 건설 PMS Pro", layout="wide")
+st.set_page_config(page_title="스타쏠라 프로젝트 관리", layout="wide") # [CHANGED] Name updated
 
 sheet = connect_to_gsheets()
 if sheet:
@@ -231,7 +229,7 @@ if sheet:
         st.session_state.master_p_df = projects_df
 
     user_role = handle_auth()
-    st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
+    st.title("🏗️ 스타쏠라 프로젝트 관리") # [CHANGED] Name updated
 
     # --- [Sidebar] 관리자 전용 기능 ---
     if user_role == "admin":
@@ -313,8 +311,6 @@ if sheet:
         
         with col2:
             st.subheader("🌦️ 실시간 날씨 정보")
-            
-            # --- [UPDATED] Weather System: Detail View ---
             st.markdown("#### 🔍 현장별 상세 날씨")
             weather_options = ["전체 요약 보기"] + projects_df['현장'].tolist()
             selected_weather_site = st.selectbox("날씨를 확인할 현장을 선택하세요", weather_options)
@@ -322,7 +318,6 @@ if sheet:
             if selected_weather_site == "전체 요약 보기":
                 st.info("아래 [현장별 날씨 요약] 섹션에서 모든 현장의 날씨를 확인할 수 있습니다.")
             else:
-                # Get the location and weather for the selected site
                 site_data = projects_df[projects_df['현장'] == selected_weather_site].iloc[0]
                 target_loc = site_data['위치'] if site_data['위치'] else "Seoul"
                 weather = fetch_weather_info(target_loc)
@@ -336,27 +331,16 @@ if sheet:
 
             st.divider()
 
-            # --- [UPDATED] Weather System: Summary View ---
             st.markdown("#### 📋 현장별 날씨 요약")
             if not projects_df.empty:
                 summary_list = []
-                # We use a loop to gather weather for all sites
-                # Thanks to @st.cache_data, this is very fast after the first load!
                 for _, row in projects_df.iterrows():
                     loc = row['위치'] if row['위치'] else "Seoul"
                     w = fetch_weather_info(loc)
                     if w:
-                        summary_list.append({
-                            "현장명": row['현장'],
-                            "온도": f"{w['temp']}°C",
-                            "상태": w['desc']
-                        })
+                        summary_list.append({"현장명": row['현장'], "온도": f"{w['temp']}°C", "상태": w['desc']})
                     else:
-                        summary_list.append({
-                            "현장명": row['현장'],
-                            "온도": "-",
-                            "상태": "정보 없음"
-                        })
+                        summary_list.append({"현장명": row['현장'], "온도": "-", "상태": "정보 없음"})
                 
                 if summary_list:
                     st.dataframe(pd.DataFrame(summary_list), hide_index=True, use_container_width=True)
@@ -391,7 +375,6 @@ if sheet:
             for _, r in df_ea.iterrows():
                 orig = managers_df[managers_df['현장'] == r['현장']]
                 ea_colors.append('#EF553B' if not orig.empty and r['인원'] > orig['예정 전기'].values[0] else '#636EFA')
-            # FIXED: Added missing closing parenthesis below
             fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors))
 
             fig_man.update_layout(barmode='group', title="현장별 인력 투입 현황 (🔴 빨간색: 계획 초과!)", xaxis={'type': 'category'})
@@ -427,10 +410,8 @@ if sheet:
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
             
-            # Data Editor
             edited_p = st.data_editor(st.session_state.master_p_df, column_config=col_config, use_container_width=True, key="editor_tab3")
             
-            # Geocoding Button
             col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
             with col_btn1:
                 if st.button("📍 위경도 자동 변환", key="btn_geocode"):
@@ -457,7 +438,6 @@ if sheet:
         st.subheader("📈 공정율 관리")
         
         if user_role == "admin":
-            # --- [MODE 1] 슬라이더 방식 (매우 쉬움) ---
             st.markdown("### ⚡ 1. 초고속 슬라이더 업데이트 (추천)")
             st.info("💡 현장 하나를 선택하고 슬라이더를 밀어서 바로 저장하세요. 타이핑할 필요가 없습니다!")
             
@@ -480,11 +460,12 @@ if sheet:
                     updated_p.at[site_idx, '전기 공정율'] = float(new_elec_prog)
                     updated_p.at[site_idx, '공정'] = new_status
                     if save_data_to_sheet(sheet, managers_df, updated_p):
+                        # [FIXED] Sync session state for Master tab
+                        st.session_state.master_p_df = updated_p
                         st.success(f"✅ '{selected_site}' 업데이트 완료!"); st.rerun()
 
             st.divider()
             
-            # --- [MODE 2] 일괄 편집 방식 (기존 방식) ---
             st.markdown("### 📋 2. 일괄 편집 모드 (Batch Edit)")
             st.info("💡 여러 현장의 데이터를 한꺼번에 수정할 때 사용하세요.")
             progress_cols = ["현장", "공정", "구조물 공정율", "전기 공정율"]
@@ -502,6 +483,8 @@ if sheet:
             )
             if st.button("💾 일괄 변경사항 저장", key="btn_save_prog"):
                 if save_data_to_sheet(sheet, managers_df, edited_prog):
+                    # [FIXED] Sync session state for Master tab
+                    st.session_state.master_p_df = edited_prog
                     st.success("✅ 일괄 업데이트 완료!"); st.rerun()
         else:
             st.dataframe(projects_df[["현장", "공정", "구조물 공정율", "전기 공정율"]], use_container_width=True)
