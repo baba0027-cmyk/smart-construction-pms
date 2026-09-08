@@ -86,7 +86,6 @@ def load_data_from_sheet():
         projects_df = fix_column_names(projects_df)
         
         if not projects_df.empty:
-            # [중요] 데이터 타입 변환
             for col in ['공사 시작일', '종료일']:
                 if col in projects_df.columns: projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
             
@@ -94,7 +93,6 @@ def load_data_from_sheet():
                 if col in projects_df.columns:
                     projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
                 else:
-                    # [방어적 코드] 컬럼이 없으면 에러 대신 0으로 채워진 컬럼을 생성하여 KeyError 방지
                     projects_df[col] = 0.0
             
             desired_order = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
@@ -128,7 +126,7 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
 # --- 4. 권한 관리 ---
 def handle_auth():
     st.sidebar.title("🔐 접속 권한")
-    auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
+    auth_mode = st.sidebar.radio("접속 모드를를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
     user_role = "viewer"
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password")
@@ -165,33 +163,19 @@ if sheet:
     # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
         if not projects_df.empty:
-            st.subheader("📈 핵심 생산성 지표 (Efficiency KPI)")
+            st.subheader("📈 핵심 현황 지표 (Summary)")
             
-            # [안내 메시지] 용량 데이터가 없을 경우 사용자에게 알림
-            if projects_df['용량 (MW)'].sum() == 0:
-                st.info("💡 **Tip**: 현재 모든 현장의 용량이 0으로 표시됩니다. 정확한 생산성 지표를 위해 구글 시트 `projects` 탭에 **'용량'** 또는 **'MW'** 컬럼을 추가하고 값을 입력해 주세요!")
-
+            # [수정] 사용자 요청에 따른 직관적 KPI 구성
             total_sites = len(projects_df)
             total_mw = projects_df['용량 (MW)'].sum()
-            
-            # 1. 평균 1MW당 공정일수 계산 (안전하게)
-            if total_mw > 0:
-                # 기간 계산 (종료일 - 시작일)
-                total_days = (projects_df['종료일'] - projects_df['공사 시작일']).dt.days.sum()
-                avg_days_per_mw = total_days / total_mw
-                
-                # 2. 1MW당 평균 투입인원 계산
-                total_manpower = managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0
-                avg_manpower_per_mw = total_manpower / total_mw
-            else:
-                avg_days_per_mw = 0
-                avg_manpower_per_mw = 0
+            total_manpower = managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0
+            high_risk_count = len(projects_df[projects_df['안전 등급'] == '위험'])
 
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
             kpi1.metric("총 현장 수", f"{total_sites} 개")
-            kpi2.metric("평균 1MW당 공정일수", f"{avg_days_per_mw:.1f} 일")
-            kpi3.metric("1MW당 평균 투입인원", f"{avg_manpower_per_mw:.1f} 명")
-            kpi4.metric("위험 현장", f"{len(projects_df[projects_df['안전 등급'] == '위험'])} 개", delta_color="inverse")
+            kpi2.metric("총 용량 (MW)", f"{total_mw:.1f} MW")
+            kpi3.metric("총 투입 인원", f"{total_manpower:.0f} 명")
+            kpi4.metric("위험 현장", f"{high_risk_count} 개", delta_color="inverse")
 
             st.divider()
             
