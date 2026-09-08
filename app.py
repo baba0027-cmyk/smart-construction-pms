@@ -21,7 +21,6 @@ def calculate_managers_totals(df):
     """데이터프레임의 '총 인원'을 '누적 구조물 + 누적 전기'로 강제 재계산합니다."""
     if df.empty:
         return df
-    # 계산에 필요한 컬럼들을 강제로 숫자형(float)으로 변환 (문자열 결합 방지)
     df["누적 구조물"] = pd.to_numeric(df["누적 구조물"], errors='coerce').fillna(0.0)
     df["누적 전기"] = pd.to_numeric(df["누적 전기"], errors='coerce').fillna(0.0)
     df["총 인원"] = df["누적 구조물"] + df["누적 전기"]
@@ -88,7 +87,6 @@ def standardize_dataframe(df, schema):
     if "공사 시작일" in new_df.columns: new_df["공사 시작일"] = new_df["공사 시작일"].fillna(datetime.now())
     if "종료일" in new_df.columns: new_df["종료일"] = new_df["종료일"].fillna(datetime.now())
     
-    # 로드 즉시 계산 적용
     if "총 인원" in new_df.columns:
         new_df = calculate_managers_totals(new_df)
     
@@ -133,9 +131,7 @@ def load_data_from_sheet():
 # --- 4. 데이터 저장 ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
-        # 저장 직전 인력 데이터 합산 강제 수행
         managers_df = calculate_managers_totals(managers_df.copy())
-
         m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
         p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
         
@@ -219,7 +215,7 @@ if sheet:
                         
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_data])], ignore_index=True)
                         updated_m = pd.concat([managers_df, pd.DataFrame([new_m_data])], ignore_index=True)
-                        updated_m = calculate_managers_totals(updated_m) # 생성 즉시 계산
+                        updated_m = calculate_managers_totals(updated_m)
                         
                         if save_data_to_sheet(sheet, updated_m, updated_p):
                             st.success(f"✅ '{new_site_name}' 생성 완료!")
@@ -248,7 +244,15 @@ if sheet:
         high_risk = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
-    tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교 (Plan vs Act)", "📋 프로젝트", "👥 인력/자원 관리"])
+    # [Tabs Configuration]
+    tab_dash, tab1, tab2, tab_progress, tab3, tab4 = st.tabs([
+        "📊 종합 대시보드", 
+        "🗺️ 지도/날씨", 
+        "👷 인력 투입 비교", 
+        "📈 공정율 관리 (Quick Update)", 
+        "📋 프로젝트 마스터", 
+        "👥 인력/자원 관리"
+    ])
 
     # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
@@ -314,27 +318,10 @@ if sheet:
             fig_man.update_layout(barmode='group', title="현장별 인력 투입 현황 (🔴 빨간색: 계획 초과!)", xaxis={'type': 'category'})
             st.plotly_chart(fig_man, use_container_width=True)
 
-            st.divider()
-            st.subheader("📝 인력 데이터 수정")
-            if user_role == "admin":
-                col_config = {
-                    "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d"),
-                    "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d"),
-                    "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d"),
-                    "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
-                    "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d", disabled=True)
-                }
-                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
-                if st.button("💾 변경사항 저장", key="btn_save_tab2"):
-                    # 저장 시점에 재계산 보장
-                    if save_data_to_sheet(sheet, edited_m, projects_df): 
-                        st.success("✅ 저장 완료! (총 인원이 자동 합산되었습니다)"); st.rerun()
-            else:
-                st.dataframe(managers_df, use_container_width=True)
-
-    # --- [Tab 3] 프로젝트 상세 ---
+    # --- [Tab 3] 프로젝트 마스터 (기초 정보 수정용) ---
     with tab3:
-        st.subheader("📋 프로젝트 상세 정보")
+        st.subheader("📋 프로젝트 마스터 정보")
+        st.info("💡 현장 위치, 용량, 안전 등급 등 프로젝트의 기초 정보를 수정합니다.")
         if user_role == "admin":
             col_config = {
                 "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
@@ -344,13 +331,43 @@ if sheet:
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
             edited_p = st.data_editor(projects_df, column_config=col_config, use_container_width=True, key="editor_tab3")
-            if st.button("💾 프로젝트 변경사항 저장", key="btn_save_tab3"):
+            if st.button("💾 프로젝트 마스터 저장", key="btn_save_tab3"):
                 if save_data_to_sheet(sheet, managers_df, edited_p): st.success("✅ 저장 완료!"); st.rerun()
             st.download_button("📥 엑셀 다운로드", export_to_excel(projects_df), "projects.xlsx", key="btn_dl_excel")
         else:
             st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
-    # --- [Tab 4] 인력 관리 ---
+    # --- [NEW] [Tab 4] 공정율 관리 (Quick Update) ---
+    with tab_progress:
+        st.subheader("📈 현장별 공정율 업데이트 (Quick)")
+        st.info("💡 현장 공정률과 진행 상태를 가장 빠르게 업데이트하는 메뉴입니다. 숫자를 클릭하여 입력하세요.")
+        
+        if user_role == "admin":
+            # 공정 관리에 꼭 필요한 컬럼만 추출하여 편집기 구성
+            progress_cols = ["현장", "공정", "구조물 공정율", "전기 공정율"]
+            col_config_prog = {
+                "구조물 공정율": st.column_config.ProgressColumn("🏗️ 구조물 %", min_value=0, max_value=100, format="%d%%"),
+                "전기 공정율": st.column_config.ProgressColumn("⚡ 전기 %", min_value=0, max_value=100, format="%d%%"),
+                "공정": st.column_config.SelectboxColumn("진행상태", options=["준비 중", "공사 중", "일시 중단", "완료"])
+            }
+            
+            # column_order를 사용하여 핵심 컬럼만 노출
+            edited_prog = st.data_editor(
+                projects_df, 
+                column_config=col_config_prog, 
+                column_order=progress_cols,
+                use_container_width=True, 
+                key="editor_tab_progress"
+            )
+            
+            if st.button("💾 공정율 변경사항 저장", key="btn_save_prog"):
+                if save_data_to_sheet(sheet, managers_df, edited_prog):
+                    st.success("✅ 공정율이 성공적으로 업데이트되었습니다!")
+                    st.rerun()
+        else:
+            st.dataframe(projects_df[progress_cols], use_container_width=True)
+
+    # --- [Tab 5] 인력/자원 관리 ---
     with tab4:
         st.subheader("👥 전체 인력/자원 관리")
         if user_role == "admin":
@@ -364,7 +381,6 @@ if sheet:
             }
             edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
             if st.button("💾 저장", key="btn_save_tab4"):
-                # 저장 시점에 재계산 로직이 save_data_to_sheet 안에 있으므로 매우 안전함
                 if save_data_to_sheet(sheet, edited_m, projects_df): 
                     st.success("✅ 저장 완료! (총 인원이 자동 합산되었습니다)"); st.rerun()
         else:
