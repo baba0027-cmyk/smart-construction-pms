@@ -14,9 +14,9 @@ def connect_to_gsheets():
     try:
         # [최종 수정] 클라우드 환경(Secrets)에서 JSON 문자열을 읽어옵니다.
         if "gcp_json" in st.secrets:
-            # st.secrets["gcp_json"]은 TOML의 """ 로 감싸진 문자열입니다.
             json_string = st.secrets["gcp_json"]
-            creds_dict = json.loads(json_string)
+            # [핵심 수정] strict=False 옵션을 추가하여 JSON 내부의 줄바꿈(엔터) 문자를 허용합니다.
+            creds_dict = json.loads(json_string, strict=False)
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
             # 로컬 테스트용
