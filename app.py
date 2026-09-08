@@ -67,7 +67,6 @@ def standardize_dataframe(df, schema):
             else:
                 new_df[col] = df[col].fillna("").astype(object)
         else:
-            # 스키마에는 있지만 기존 데이터엔 없는 경우 기본값 채우기
             if col in ["용량 (MW)", "구조물 공정율", "전기 공정율", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]:
                 new_df[col] = 0.0
             elif col in ["공사 시작일", "종료일"]:
@@ -77,7 +76,6 @@ def standardize_dataframe(df, schema):
             else:
                 new_df[col] = ""
                 
-    # 날짜 결측치 최종 처리
     if "공사 시작일" in new_df.columns: new_df["공사 시작일"] = new_df["공사 시작일"].fillna(datetime.now())
     if "종료일" in new_df.columns: new_df["종료일"] = new_df["종료일"].fillna(datetime.now())
     
@@ -108,11 +106,9 @@ def load_data_from_sheet():
     sheet = connect_to_gsheets()
     if sheet is None: return pd.DataFrame(columns=MANAGERS_SCHEMA), pd.DataFrame(columns=PROJECTS_SCHEMA)
     try:
-        # Managers 로드 및 표준화
         raw_m = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = standardize_dataframe(raw_m, MANAGERS_SCHEMA)
         
-        # Projects 로드 및 표준화
         raw_p = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = standardize_dataframe(raw_p, PROJECTS_SCHEMA)
         
@@ -124,21 +120,17 @@ def load_data_from_sheet():
 # --- 4. 데이터 저장 (안전한 저장) ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
-        # 저장 전 NaN을 None으로 변환하여 JSON 에러 방지
         m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
         p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
         
-        # 날짜를 문자열로 변환
         for col in ['공사 시작일', '종료일']:
             if col in p_clean.columns:
                 p_clean[col] = p_clean[col].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (datetime, pd.Timestamp)) else x)
 
-        # Managers 저장
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
         ws_m.update([m_clean.columns.tolist()] + m_clean.values.tolist())
         
-        # Projects 저장
         ws_p = sheet.worksheet("projects")
         ws_p.clear()
         ws_p.update([p_clean.columns.tolist()] + p_clean.values.tolist())
@@ -152,10 +144,10 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
 # --- 5. 권한 관리 ---
 def handle_auth():
     st.sidebar.title("🔐 접속 권한")
-    auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
+    auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"], key="auth_radio")
     user_role = "viewer"
     if auth_mode == "관리자 (수정/관리용)":
-        password = st.sidebar.text_input("관리자 비밀번호", type="password")
+        password = st.sidebar.text_input("관리자 비밀번호", type="password", key="admin_pw_input")
         admin_pw = st.secrets.get("ADMIN_PW", "1931")
         if password == admin_pw:
             user_role = "admin"
@@ -194,7 +186,6 @@ if sheet:
                     if not new_site_name:
                         st.error("현장명은 반드시 입력해야 합니다!")
                     else:
-                        # 마스터 스키마에 맞춰 정확히 한 줄 생성
                         new_p_data = {col: "" for col in PROJECTS_SCHEMA}
                         new_p_data.update({
                             "현장": new_site_name, "소장": new_site_manager, "용량 (MW)": new_site_mw,
@@ -202,20 +193,16 @@ if sheet:
                             "구조물 공정율": 0.0, "전기 공정율": 0.0, "공사 시작일": datetime.now(), "종료일": datetime.now(),
                             "위도": 36.5, "경도": 127.5
                         })
-                        
                         new_m_data = {col: 0 for col in MANAGERS_SCHEMA}
                         new_m_data.update({
                             "현장": new_site_name, "소장": new_site_manager,
                             "예정 구조물": 0, "예정 전기": 0, "누적 구조물": 0, "누적 전기": 0, "총 인원": 0
                         })
-                        
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_data])], ignore_index=True)
                         updated_m = pd.concat([managers_df, pd.DataFrame([new_m_data])], ignore_index=True)
-                        
                         if save_data_to_sheet(sheet, updated_m, updated_p):
                             st.success(f"✅ '{new_site_name}' 현장이 생성되었습니다!"); st.rerun()
 
-    # --- 상단 알림 ---
     if not projects_df.empty:
         high_risk = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
@@ -266,20 +253,16 @@ if sheet:
             df_plot = pd.DataFrame(melted_data)
             
             fig_man = go.Figure()
-            # 구조물 계획
             df_sp = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='계획(Plan)')]
             fig_man.add_trace(go.Bar(x=df_sp['현장'], y=df_sp['인원'], name='🏗️ 구조물(계획)', marker_color='#D3D3D3'))
-            # 구조물 누적
             df_sa = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='누적(Actual)')]
             sa_colors = []
             for _, r in df_sa.iterrows():
                 orig = managers_df[managers_df['현장'] == r['현장']]
                 sa_colors.append('#EF553B' if not orig.empty and r['인원'] > orig['예정 구조물'].values[0] else '#636EFA')
             fig_man.add_trace(go.Bar(x=df_sa['현장'], y=df_sa['인원'], name='🏗️ 구조물(누적)', marker_color=sa_colors))
-            # 전기 계획
             df_ep = df_plot[(df_plot['공종']=='전기') & (df_plot['구분']=='계획(Plan)')]
             fig_man.add_trace(go.Bar(x=df_ep['현장'], y=df_ep['인원'], name='⚡ 전기(계획)', marker_color='#D3D3D3'))
-            # 전기 누적
             df_ea = df_plot[(df_plot['공종']=='전기') & (df_plot['구분']=='누적(Actual)')]
             ea_colors = []
             for _, r in df_ea.iterrows():
@@ -300,8 +283,10 @@ if sheet:
                     "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
                     "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d")
                 }
-                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True)
-                if st.button("💾 변경사항 저장"):
+                # [FIX] key="editor_tab2" 추가
+                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
+                # [FIX] key="btn_save_tab2" 추가
+                if st.button("💾 변경사항 저장", key="btn_save_tab2"):
                     if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
             else:
                 st.dataframe(managers_df, use_container_width=True)
@@ -317,10 +302,12 @@ if sheet:
                 "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
-            edited_p = st.data_editor(projects_df, column_config=col_config, use_container_width=True)
-            if st.button("💾 프로젝트 변경사항 저장"):
+            # [FIX] key="editor_tab3" 추가
+            edited_p = st.data_editor(projects_df, column_config=col_config, use_container_width=True, key="editor_tab3")
+            # [FIX] key="btn_save_tab3" 추가
+            if st.button("💾 프로젝트 변경사항 저장", key="btn_save_tab3"):
                 if save_data_to_sheet(sheet, managers_df, edited_p): st.success("✅ 저장 완료!"); st.rerun()
-            st.download_button("📥 엑셀 다운로드", export_to_excel(projects_df), "projects.xlsx")
+            st.download_button("📥 엑셀 다운로드", export_to_excel(projects_df), "projects.xlsx", key="btn_dl_excel")
         else:
             st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
@@ -330,7 +317,8 @@ if sheet:
         if user_role == "admin":
             if '이름' in managers_df.columns and managers_df['이름'].nunique() > len(managers_df):
                 st.info("💡 [소장님 개인별 관리 모드]")
-                st.data_editor(managers_df, use_container_width=True)
+                # [FIX] key="editor_tab4_mgr" 추가
+                st.data_editor(managers_df, use_container_width=True, key="editor_tab4_mgr")
             else:
                 st.info("💡 [현장별 인력 투입 관리 모드]")
                 col_config = {
@@ -340,8 +328,10 @@ if sheet:
                     "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
                     "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d")
                 }
-                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True)
-                if st.button("💾 저장"):
+                # [FIX] key="editor_tab4_site" 추가
+                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
+                # [FIX] key="btn_save_tab4" 추가
+                if st.button("💾 저장", key="btn_save_tab4"):
                     if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료!"); st.rerun()
         else:
             st.dataframe(managers_df, use_container_width=True)
