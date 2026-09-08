@@ -15,7 +15,7 @@ import io
 def fix_column_names(df):
     if df.empty: return df
     # 표준 이름을 KEY로, 그 외의 모든 변형을 VALUE(리스트)로 설정합니다.
-    # 중요: '현장명'을 별도의 KEY로 두지 않고 '현장'의 별칭으로 통합했습니다.
+    # '현장명'을 포함한 모든 변형을 '현장'이라는 하나의 표준 이름으로 통일합니다.
     mapping = {
         "현장": ["현장", "현장명", "현장 이름", "현장명(명)", "대상현장"],
         "소장": ["소장", "현장소장", "소장명", "담당자"],
@@ -96,7 +96,8 @@ def load_data_from_sheet():
             for col in ["구조물 공정율", "전기 공정율"]:
                 if col in projects_df.columns: projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
             
-            desired_order = ["현장명", "소장", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
+            # [수정] desired_order의 '현장명'을 표준 이름인 '현장'으로 변경
+            desired_order = ["현장", "소장", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
             existing_cols = [col for col in desired_order if col in projects_df.columns]
             extra_cols = [col for col in projects_df.columns if col not in existing_cols]
             projects_df = projects_df[existing_cols + extra_cols]
@@ -156,7 +157,8 @@ if sheet:
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
     if not projects_df.empty:
-        high_risk = projects_df[projects_df['안전 등급'] == '위험']['현장명'].tolist()
+        # [수정] '현장명' 대신 '현장' 사용
+        high_risk = projects_df[projects_df['안전 등급'] == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
     tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교 (Plan vs Act)", "📋 프로젝트", "👥 인력/자원 관리"])
@@ -177,7 +179,8 @@ if sheet:
             st.divider()
             col_c1, col_c2 = st.columns(2)
             with col_c1:
-                fig_bar = px.bar(projects_df, x="현장명", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 현황 (%)")
+                # [수정] x="현장명" 대신 x="현장" 사용
+                fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 현황 (%)")
                 st.plotly_chart(fig_bar, use_container_width=True)
             with col_c2:
                 fig_pie = px.pie(projects_df, names="안전 등급", title="안전 등급 분포", color="안전 등급", color_discrete_map={"정상": "green", "주의": "orange", "위험": "red"})
@@ -190,7 +193,8 @@ if sheet:
             m = folium.Map(location=[36.5, 127.5], zoom_start=7)
             for _, row in projects_df.iterrows():
                 if '위도' in row and '경도' in row and pd.notnull(row['위도']):
-                    folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장명']).add_to(m)
+                    # [수정] popup=row['현장명'] 대신 popup=row['현장'] 사용
+                    folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장']).add_to(m)
             st_folium(m, width=700, height=450)
         with col2:
             st.subheader("🌦️ 지역별 날씨")
@@ -202,8 +206,6 @@ if sheet:
         st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         
         required_cols = ["현장", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기"]
-        
-        # [수정] 어떤 컬럼이 진짜로 없는지 알려주는 정밀 에러 메시지
         missing_cols = [c for c in required_cols if c not in managers_df.columns]
         
         if not missing_cols:
