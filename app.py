@@ -18,9 +18,7 @@ MANAGERS_SCHEMA = ["현장", "소장", "예정 구조물", "예정 전기", "누
 # --- 1. [Engine] 강력한 계산 및 표준화 엔진 ---
 
 def calculate_managers_totals(df):
-    """데이터프레임의 '총 인원'을 '누적 구조물 + 누적 전기'로 강제 재계산합니다."""
-    if df.empty:
-        return df
+    if df.empty: return df
     df["누적 구조물"] = pd.to_numeric(df["누적 구조물"], errors='coerce').fillna(0.0)
     df["누적 전기"] = pd.to_numeric(df["누적 전기"], errors='coerce').fillna(0.0)
     df["총 인원"] = df["누적 구조물"] + df["누적 전기"]
@@ -63,7 +61,6 @@ def fix_column_names(df):
 def standardize_dataframe(df, schema):
     df = fix_column_names(df)
     new_df = pd.DataFrame(index=df.index, columns=schema)
-    
     for col in schema:
         if col in df.columns:
             if col in ["용량 (MW)", "구조물 공정율", "전기 공정율", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]:
@@ -83,13 +80,9 @@ def standardize_dataframe(df, schema):
                 new_df[col] = 36.5
             else:
                 new_df[col] = ""
-                
     if "공사 시작일" in new_df.columns: new_df["공사 시작일"] = new_df["공사 시작일"].fillna(datetime.now())
     if "종료일" in new_df.columns: new_df["종료일"] = new_df["종료일"].fillna(datetime.now())
-    
-    if "총 인원" in new_df.columns:
-        new_df = calculate_managers_totals(new_df)
-    
+    if "총 인원" in new_df.columns: new_df = calculate_managers_totals(new_df)
     return new_df
 
 # --- 2. 구글 시트 연결 ---
@@ -119,10 +112,8 @@ def load_data_from_sheet():
     try:
         raw_m = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = standardize_dataframe(raw_m, MANAGERS_SCHEMA)
-        
         raw_p = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = standardize_dataframe(raw_p, PROJECTS_SCHEMA)
-        
         return managers_df, projects_df
     except Exception as e:
         st.error(f"로드 오류: {e}")
@@ -134,19 +125,15 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
         managers_df = calculate_managers_totals(managers_df.copy())
         m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
         p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
-        
         for col in ['공사 시작일', '종료일']:
             if col in p_clean.columns:
                 p_clean[col] = p_clean[col].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (datetime, pd.Timestamp)) else x)
-
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
         ws_m.update([m_clean.columns.tolist()] + m_clean.values.tolist())
-        
         ws_p = sheet.worksheet("projects")
         ws_p.clear()
         ws_p.update([p_clean.columns.tolist()] + p_clean.values.tolist())
-        
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -184,7 +171,6 @@ if sheet:
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
-    # --- [Sidebar] 관리자 전용 기능 ---
     if user_role == "admin":
         with st.sidebar.expander("🚀 신규 현장 즉시 등록", expanded=False):
             with st.form("quick_add_site_form", clear_on_submit=True):
@@ -193,68 +179,40 @@ if sheet:
                 new_site_mw = st.number_input("⚡ 용량 (MW)", min_value=0.0, step=0.1)
                 new_site_loc = st.text_input("🗺️ 위치 (예: 전남 고흥)")
                 submit_new_site = st.form_submit_button("🆕 현장 생성 및 시트 반영")
-                
                 if submit_new_site:
-                    if not new_site_name:
-                        st.error("현장명은 반드시 입력해야 합니다!")
-                    elif new_site_name in projects_df['현장'].values:
-                        st.error("이미 존재하는 현장명입니다!")
+                    if not new_site_name: st.error("현장명은 반드시 입력해야 합니다!")
+                    elif new_site_name in projects_df['현장'].values: st.error("이미 존재하는 현장명입니다!")
                     else:
                         new_p_data = {col: "" for col in PROJECTS_SCHEMA}
-                        new_p_data.update({
-                            "현장": new_site_name, "소장": new_site_manager, "용량 (MW)": new_site_mw,
-                            "위치": new_site_loc, "안전 등급": "정상", "공정": "준비 중",
-                            "구조물 공정율": 0.0, "전기 공정율": 0.0, "공사 시작일": datetime.now(), "종료일": datetime.now(),
-                            "위도": 36.5, "경도": 127.5
-                        })
+                        new_p_data.update({"현장": new_site_name, "소장": new_site_manager, "용량 (MW)": new_site_mw, "위치": new_site_loc, "안전 등급": "정상", "공정": "준비 중", "구조물 공정율": 0.0, "전기 공정율": 0.0, "공사 시작일": datetime.now(), "종료일": datetime.now(), "위도": 36.5, "경도": 127.5})
                         new_m_data = {col: 0 for col in MANAGERS_SCHEMA}
-                        new_m_data.update({
-                            "현장": new_site_name, "소장": new_site_manager,
-                            "예정 구조물": 0, "예정 전기": 0, "누적 구조물": 0, "누적 전기": 0, "총 인원": 0
-                        })
-                        
+                        new_m_data.update({"현장": new_site_name, "소장": new_site_manager, "예정 구조물": 0, "예정 전기": 0, "누적 구조물": 0, "누적 전기": 0, "총 인원": 0})
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_data])], ignore_index=True)
                         updated_m = pd.concat([managers_df, pd.DataFrame([new_m_data])], ignore_index=True)
                         updated_m = calculate_managers_totals(updated_m)
-                        
-                        if save_data_to_sheet(sheet, updated_m, updated_p):
-                            st.success(f"✅ '{new_site_name}' 생성 완료!")
-                            st.rerun()
+                        if save_data_to_sheet(sheet, updated_m, updated_p): st.success(f"✅ '{new_site_name}' 생성 완료!"); st.rerun()
 
         with st.sidebar.expander("🗑️ 현장 삭제 (관리자용)", expanded=False):
             if not projects_df.empty:
                 site_to_delete = st.selectbox("삭제할 현장 선택", projects_df['현장'].tolist(), key="delete_site_sel")
                 st.warning(f"⚠️ '{site_to_delete}' 현장을 삭제하면 모든 인력 데이터도 함께 삭제됩니다.")
                 confirm_delete = st.checkbox("❌ 삭제를 확정합니다", key="confirm_delete_check")
-                
                 if st.button("🚨 현장 삭제 실행", key="btn_delete_exec"):
                     if confirm_delete:
                         updated_p = projects_df[projects_df['현장'] != site_to_delete]
                         updated_m = managers_df[managers_df['현장'] != site_to_delete]
-                        if save_data_to_sheet(sheet, updated_m, updated_p):
-                            st.error(f"✅ '{site_to_delete}' 현장이 삭제되었습니다!")
-                            st.rerun()
-                    else:
-                        st.info("⚠️ 삭제를 확정하려면 체크박스를 선택해주세요.")
-            else:
-                st.info("삭제할 현장이 없습니다.")
+                        if save_data_to_sheet(sheet, updated_m, updated_p): st.error(f"✅ '{site_to_delete}' 현장이 삭제되었습니다!"); st.rerun()
+                    else: st.info("⚠️ 삭제를 확정하려면 체크박스를 선택해주세요.")
+            else: st.info("삭제할 현장이 없습니다.")
 
-    # --- 상단 알림 ---
     if not projects_df.empty:
         high_risk = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
-    # [Tabs Configuration]
     tab_dash, tab1, tab2, tab_progress, tab3, tab4 = st.tabs([
-        "📊 종합 대시보드", 
-        "🗺️ 지도/날씨", 
-        "👷 인력 투입 비교", 
-        "📈 공정율 관리 (Quick Update)", 
-        "📋 프로젝트 마스터", 
-        "👥 인력/자원 관리"
+        "📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교", "📈 공정율 관리", "📋 프로젝트 마스터", "👥 인력/자원 관리"
     ])
 
-    # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
         if not projects_df.empty:
             st.subheader("📈 핵심 현황 지표 (Summary)")
@@ -263,13 +221,11 @@ if sheet:
             kpi2.metric("총 용량 (MW)", f"{projects_df['용량 (MW)'].sum():.1f} MW")
             kpi3.metric("총 투입 인원", f"{managers_df['총 인원'].sum():.0f} 명")
             kpi4.metric("위험 현장", f"{len(projects_df[projects_df['안전 등급'].astype(str) == '위험'])} 개", delta_color="inverse")
-            
             st.divider()
             st.subheader("📊 현장별 공정 진행 현황 (%)")
             fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 구조물 vs 전기 공정율 비교", color_discrete_sequence=["#1f77b4", "#ff7f0e"])
             st.plotly_chart(fig_bar, use_container_width=True)
 
-    # --- [Tab 1] 지도 ---
     with tab1:
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -284,7 +240,6 @@ if sheet:
             st.subheader("🌦️ 지역별 날씨")
             st.write("☀️ 서울: 맑음")
 
-    # --- [Tab 2] 인력 비교 차트 ---
     with tab2:
         st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         if not managers_df.empty:
@@ -296,7 +251,6 @@ if sheet:
                 melted_data.append({'현장': site, '공종': '전기', '구분': '계획(Plan)', '인원': row['예정 전기']})
                 melted_data.append({'현장': site, '공종': '전기', '구분': '누적(Actual)', '인원': row['누적 전기']})
             df_plot = pd.DataFrame(melted_data)
-            
             fig_man = go.Figure()
             df_sp = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='계획(Plan)')]
             fig_man.add_trace(go.Bar(x=df_sp['현장'], y=df_sp['인원'], name='🏗️ 구조물(계획)', marker_color='#D3D3D3'))
@@ -314,11 +268,25 @@ if sheet:
                 orig = managers_df[managers_df['현장'] == r['현장']]
                 ea_colors.append('#EF553B' if not orig.empty and r['인원'] > orig['예정 전기'].values[0] else '#636EFA')
             fig_man.add_trace(go.Bar(x=df_ea['현장'], y=df_ea['인원'], name='⚡ 전기(누적)', marker_color=ea_colors))
-
             fig_man.update_layout(barmode='group', title="현장별 인력 투입 현황 (🔴 빨간색: 계획 초과!)", xaxis={'type': 'category'})
             st.plotly_chart(fig_man, use_container_width=True)
 
-    # --- [Tab 3] 프로젝트 마스터 (기초 정보 수정용) ---
+            st.divider()
+            st.subheader("📝 인력 데이터 수정")
+            if user_role == "admin":
+                col_config = {
+                    "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d"),
+                    "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d"),
+                    "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d"),
+                    "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
+                    "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d", disabled=True)
+                }
+                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
+                if st.button("💾 변경사항 저장", key="btn_save_tab2"):
+                    if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료! (총 인원이 자동 합산되었습니다)"); st.rerun()
+            else:
+                st.dataframe(managers_df, use_container_width=True)
+
     with tab3:
         st.subheader("📋 프로젝트 마스터 정보")
         st.info("💡 현장 위치, 용량, 안전 등급 등 프로젝트의 기초 정보를 수정합니다.")
@@ -337,21 +305,51 @@ if sheet:
         else:
             st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
-    # --- [NEW] [Tab 4] 공정율 관리 (Quick Update) ---
+    # --- [NEW/IMPROVED] [Tab 4] 공정율 관리 (Quick Update) ---
     with tab_progress:
-        st.subheader("📈 현장별 공정율 업데이트 (Quick)")
-        st.info("💡 현장 공정률과 진행 상태를 가장 빠르게 업데이트하는 메뉴입니다. 숫자를 클릭하여 입력하세요.")
+        st.subheader("📈 공정율 관리")
         
         if user_role == "admin":
-            # 공정 관리에 꼭 필요한 컬럼만 추출하여 편집기 구성
+            # --- [MODE 1] 슬라이더 방식 (매우 쉬움) ---
+            st.markdown("### ⚡ 1. 초고속 슬라이더 업데이트 (추천)")
+            st.info("💡 현장 하나를 선택하고 슬라이더를 밀어서 바로 저장하세요. 타이핑할 필요가 없습니다!")
+            
+            selected_site = st.selectbox("📍 업데이트할 현장을 선택하세요", projects_df['현장'].tolist(), key="slider_site_sel")
+            
+            if selected_site:
+                # 선택된 현장의 데이터 가져오기
+                site_idx = projects_df[projects_df['현장'] == selected_site].index[0]
+                current_row = projects_df.loc[site_idx]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_struct_prog = st.slider("🏗️ 구조물 공정율 (%)", 0, 100, int(current_row['구조물 공정율']))
+                    new_status = st.selectbox("🔄 현재 공정 상태", ["준비 중", "공사 중", "일시 중단", "완료"], index=["준비 중", "공사 중", "일시 중단", "완료"].index(current_row['공정']))
+                with col2:
+                    new_elec_prog = st.slider("⚡ 전기 공정율 (%)", 0, 100, int(current_row['전기 공정율']))
+                
+                if st.button(f"✅ '{selected_site}' 정보 업데이트", key="btn_update_slider"):
+                    # 데이터 업데이트
+                    updated_p = projects_df.copy()
+                    updated_p.at[site_idx, '구조물 공정율'] = float(new_struct_prog)
+                    updated_p.at[site_idx, '전기 공정율'] = float(new_elec_prog)
+                    updated_p.at[site_idx, '공정'] = new_status
+                    
+                    if save_data_to_sheet(sheet, managers_df, updated_p):
+                        st.success(f"✅ '{selected_site}' 업데이트 완료!")
+                        st.rerun()
+
+            st.divider()
+            
+            # --- [MODE 2] 일괄 편집 방식 (기존 방식) ---
+            st.markdown("### 📋 2. 일괄 편집 모드 (Batch Edit)")
+            st.info("💡 여러 현장의 데이터를 한꺼번에 수정할 때 사용하세요.")
             progress_cols = ["현장", "공정", "구조물 공정율", "전기 공정율"]
             col_config_prog = {
                 "구조물 공정율": st.column_config.ProgressColumn("🏗️ 구조물 %", min_value=0, max_value=100, format="%d%%"),
                 "전기 공정율": st.column_config.ProgressColumn("⚡ 전기 %", min_value=0, max_value=100, format="%d%%"),
                 "공정": st.column_config.SelectboxColumn("진행상태", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
-            
-            # column_order를 사용하여 핵심 컬럼만 노출
             edited_prog = st.data_editor(
                 projects_df, 
                 column_config=col_config_prog, 
@@ -359,15 +357,13 @@ if sheet:
                 use_container_width=True, 
                 key="editor_tab_progress"
             )
-            
-            if st.button("💾 공정율 변경사항 저장", key="btn_save_prog"):
+            if st.button("💾 일괄 변경사항 저장", key="btn_save_prog"):
                 if save_data_to_sheet(sheet, managers_df, edited_prog):
-                    st.success("✅ 공정율이 성공적으로 업데이트되었습니다!")
+                    st.success("✅ 일괄 업데이트 완료!")
                     st.rerun()
         else:
-            st.dataframe(projects_df[progress_cols], use_container_width=True)
+            st.dataframe(projects_df[["현장", "공정", "구조물 공정율", "전기 공정율"]], use_container_width=True)
 
-    # --- [Tab 5] 인력/자원 관리 ---
     with tab4:
         st.subheader("👥 전체 인력/자원 관리")
         if user_role == "admin":
