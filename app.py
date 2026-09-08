@@ -8,14 +8,12 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- 0. [핵심] 자동 컬럼 교정 엔진 (충돌 해결 버전) ---
+# --- 0. [핵심] 자동 컬럼 교정 엔진 ---
 def fix_column_names(df):
     """구글 시트의 컬럼 이름이 제각각이어도 표준 이름으로 교정합니다."""
     if df.empty:
         return df
     
-    # 매핑 규칙: { '표준이름': ['사용자가 쓸만한 이름들'] }
-    # '상태'는 인력용(상태)과 프로젝트용(공정)이 구분되어야 함을 반영
     mapping = {
         "현장명": ["현장명", "현장 이름", "현장명(명)"],
         "소장": ["소장", "현장소장", "소장명", "담당자"],
@@ -25,8 +23,8 @@ def fix_column_names(df):
         "공사 시작일": ["공사 시작일", "시작일", "공사시작일", "시작 예정일"],
         "종료일": ["종료일", "종료(예정)일", "종료예정일", "종료일(예정)"],
         "안전 등급": ["안전 등급", "안전등급", "안전", "안전상태"],
-        "공정": ["공정", "진행상태", "공정상태", "프로젝트상태"], # '상태'를 여기서 제외!
-        "상태": ["상태", "인력상태", "근무상태", "현장상태"], # 인력용 '상태'를 별도 정의
+        "공정": ["공정", "진행상태", "공정상태", "프로젝트상태"],
+        "상태": ["상태", "인력상태", "근무상태", "현장상태"],
         "구조물 공정율": ["구조물 공정율", "구조물공정율", "구조물%", "구조물 공정"],
         "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
         "이름": ["이름", "성함", "성명"]
@@ -65,7 +63,7 @@ def connect_to_gsheets():
         st.error(f"구글 시트 연결 실패! 원인: {e}")
         return None
 
-# --- 2. 데이터 로드 ---
+# --- 2. 데이터 로드 및 [컬럼 순서 최적화] ---
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
     sheet = connect_to_gsheets()
@@ -73,16 +71,15 @@ def load_data_from_sheet():
     
     try:
         # 1. Managers 데이터 로드 및 교정
-        managers_raw = sheet.worksheet("managers").get_all_records()
-        managers_df = pd.DataFrame(managers_raw)
+        managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = fix_column_names(managers_df)
         
         # 2. Projects 데이터 로드 및 교정
-        projects_raw = sheet.worksheet("projects").get_all_records()
-        projects_df = pd.DataFrame(projects_raw)
+        projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = fix_column_names(projects_df)
         
         if not projects_df.empty:
+            # [날짜/숫자 타입 정밀 교정]
             for col in ['공사 시작일', '종료일']:
                 if col in projects_df.columns:
                     projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
@@ -90,6 +87,23 @@ def load_data_from_sheet():
             for col in ["구조물 공정율", "전기 공정율"]:
                 if col in projects_df.columns:
                     projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
+
+            # -------------------------------------------------------
+            # [⭐ 핵심 추가] 프로젝트 컬럼 순서 최적화 로직
+            # -------------------------------------------------------
+            # 사용자가 원하는 순서 정의 (공정율 다음에 시작일/종료일 배치)
+            desired_order = [
+                "현장명", "소장", "위치", "안전 등급", "공정", 
+                "구조물 공정율", "전기 공정율", "공사 시작일", "종료일",
+                "위도", "경도"
+            ]
+            # 실제 데이터에 존재하는 컬럼만 필터링하여 순서 재배치
+            existing_cols = [col for col in desired_order if col in projects_df.columns]
+            # 만약 desired_order에 없는 컬럼이 있다면 맨 뒤에 붙임
+            extra_cols = [col for col in projects_df.columns if col not in existing_cols]
+            projects_df = projects_df[existing_cols + extra_cols]
+            # -------------------------------------------------------
+
         return managers_df, projects_df
     except Exception as e:
         st.error(f"데이터 로드 중 오류 발생: {e}")
@@ -101,7 +115,6 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
         # 1. Managers 저장
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
-        # 저장할 때 컬럼 순서와 이름을 유지하기 위해 header 포함
         ws_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
         
         # 2. Projects 저장
@@ -158,7 +171,6 @@ if sheet:
         st.sidebar.header("➕ 새 프로젝트 배정")
         new_p_name = st.sidebar.text_input("현장명")
         
-        # 관리자 모드에서 이름/상태 컬럼이 있는지 안전하게 확인
         available_managers = []
         if not managers_df.empty:
             if '상태' in managers_df.columns and '이름' in managers_df.columns:
@@ -217,7 +229,6 @@ if sheet:
         st.subheader("👷 소장님 실시간 상태 및 공정율")
         status_list = []
         for _, m_row in managers_df.iterrows():
-            # KeyError 방지를 위한 .get() 사용
             name = m_row.get('이름', '이름없음')
             status = m_row.get('상태', '정보없음')
             struct_val, elec_val = 0, 0
@@ -278,7 +289,6 @@ if sheet:
     with tab4:
         st.subheader("👥 인력 정보 관리")
         if user_role == "admin":
-            # '상태' 컬럼이 있을 때만 Selectbox 적용
             col_config = {}
             if '상태' in managers_df.columns:
                 col_config["상태"] = st.column_config.SelectboxColumn("상태", options=["공사중", "휴식중"])
