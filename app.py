@@ -162,6 +162,57 @@ if sheet:
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
+    # --- [Sidebar] 관리자 전용 신규 현장 등록 기능 (핵심!) ---
+    if user_role == "admin":
+        with st.sidebar.expander("🚀 신규 현장 즉시 등록 (동기화)", expanded=True):
+            st.info("현장명만 입력해도 [프로젝트]와 [인력관리] 시트에 동시에 생성됩니다.")
+            with st.form("quick_add_site"):
+                new_site_name = st.text_input("📍 신규 현장명 *")
+                new_site_manager = st.text_input("👤 현장 소장")
+                new_site_mw = st.number_input("⚡ 용량 (MW)", min_value=0.0, step=0.1)
+                new_site_loc = st.text_input("🗺️ 위치 (예: 전남 고흥)")
+                
+                submit_new_site = st.form_submit_button("🆕 현장 생성 및 시트 반영")
+                
+                if submit_new_site:
+                    if not new_site_name:
+                        st.error("현장명은 반드시 입력해야 합니다!")
+                    else:
+                        # 1. Projects용 새 데이터 생성
+                        new_p_row = {
+                            "현장": new_site_name,
+                            "소장": new_site_manager,
+                            "용량 (MW)": new_site_mw,
+                            "위치": new_site_loc,
+                            "안전 등급": "정상",
+                            "공정": "준비 중",
+                            "구조물 공정율": 0.0,
+                            "전기 공정율": 0.0,
+                            "공사 시작일": datetime.now(),
+                            "종료일": datetime.now(),
+                            "위도": 36.5,
+                            "경도": 127.5
+                        }
+                        # 2. Managers용 새 데이터 생성 (차트 깨짐 방지를 위해 인력값 0으로 자동 생성)
+                        new_m_row = {
+                            "현장": new_site_name,
+                            "소장": new_site_manager,
+                            "예정 구조물": 0,
+                            "예정 전기": 0,
+                            "누적 구조물": 0,
+                            "누적 전기": 0,
+                            "총 인원": 0
+                        }
+                        
+                        # 데이터 합치기
+                        updated_p = pd.concat([projects_df, pd.DataFrame([new_p_row])], ignore_index=True)
+                        updated_m = pd.concat([managers_df, pd.DataFrame([new_m_row])], ignore_index=True)
+                        
+                        # 시트에 저장
+                        if save_data_to_sheet(sheet, updated_m, updated_p):
+                            st.success(f"✅ '{new_site_name}' 현장이 생성되었습니다!")
+                            st.rerun()
+
     if not projects_df.empty:
         high_risk_mask = projects_df['안전 등급'].astype(str) == '위험'
         high_risk = projects_df[high_risk_mask]['현장'].tolist()
@@ -207,7 +258,7 @@ if sheet:
             st.subheader("🌦️ 지역별 날씨")
             st.write("☀️ 서울: 맑음")
 
-    # --- [Tab 2] 인력 투입 비교 (개선됨: 현장명 중심 & 그룹화) ---
+    # --- [Tab 2] 인력 투입 비교 (현장명 중심 & 그룹화) ---
     with tab2:
         st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         
@@ -215,37 +266,25 @@ if sheet:
         missing_cols = [c for c in required_cols if c not in managers_df.columns]
         
         if not missing_cols:
-            # 1. 데이터 가공: 각 현장별로 4개의 데이터 포인트를 만듭니다.
             melted_data = []
             for _, row in managers_df.iterrows():
                 site = str(row['현장'])
-                # (구조물 - 계획), (구조물 - 누적), (전기 - 계획), (전기 - 누적)
                 melted_data.append({'현장': site, '공종': '구조물', '구분': '계획(Plan)', '인원': row['예정 구조물']})
                 melted_data.append({'현장': site, '공종': '구조물', '구분': '누적(Actual)', '인원': row['누적 구조물']})
                 melted_data.append({'현장': site, '공종': '전기', '구분': '계획(Plan)', '인원': row['예정 전기']})
                 melted_data.append({'현장': site, '공종': '전기', '구분': '누적(Actual)', '인원': row['누적 전기']})
             
             df_plot = pd.DataFrame(melted_data)
-
-            # 2. 차트 생성 (go.Figure 사용)
-            # X축을 '현장'으로 고정하고, 각 항목별로 Trace를 만들어 그룹화합니다.
             fig_man = go.Figure()
 
-            # 항목 정의: (공종, 구분, 색상_Base, 이름)
-            # '누적(Actual)'의 경우 계획보다 많으면 빨간색으로 만들기 위해 별도 로직 적용
-            
-            # --- Trace 1: 구조물 계획 (회색) ---
+            # Trace 1: 구조물 계획
             df_struct_plan = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='계획(Plan)')]
             fig_man.add_trace(go.Bar(x=df_struct_plan['현장'], y=df_struct_plan['인원'], name='🏗️ 구조물(계획)', marker_color='#D3D3D3'))
 
-            # --- Trace 2: 구조물 누적 (파랑 or 빨강) ---
+            # Trace 2: 구조물 누적 (Red Alert)
             df_struct_act = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='누적(Actual)')]
-            # 계획 대비 초과 여부 확인을 위해 원래 managers_df와 조인
-            # (여기서는 단순화를 위해 df_plot 내에서 비교 로직을 쓸 수 있음)
             struct_act_colors = []
             for _, row in df_struct_act.iterrows():
-                plan_val = df_plot[(df_plot['현장']==row['현장']) & (df_plot['공종']=='구조물') & (df_plot['구분']=='계획(Plan) ')]['인원'].values
-                # 위 코드는 인덱싱 이슈가 있을 수 있으니 안전하게 managers_df에서 가져옴
                 orig_row = managers_df[managers_df['현장'] == row['현장']]
                 if not orig_row.empty and row['인원'] > orig_row['예정 구조물'].values[0]:
                     struct_act_colors.append('#EF553B') # 🔴 Red
@@ -253,11 +292,11 @@ if sheet:
                     struct_act_colors.append('#636EFA') # 🔵 Blue
             fig_man.add_trace(go.Bar(x=df_struct_act['현장'], y=df_struct_act['인원'], name='🏗️ 구조물(누적)', marker_color=struct_act_colors))
 
-            # --- Trace 3: 전기 계획 (회색) ---
+            # Trace 3: 전기 계획
             df_elec_plan = df_plot[(df_plot['공종']=='전기') & (df_plot['구분']=='계획(Plan)')]
             fig_man.add_trace(go.Bar(x=df_elec_plan['현장'], y=df_elec_plan['인원'], name='⚡ 전기(계획)', marker_color='#D3D3D3'))
 
-            # --- Trace 4: 전기 누적 (파랑 or 빨강) ---
+            # Trace 4: 전기 누적 (Red Alert)
             df_elec_act = df_plot[(df_plot['공종']=='전기') & (df_plot['구분']=='누적(Actual)')]
             elec_act_colors = []
             for _, row in df_elec_act.iterrows():
@@ -274,16 +313,15 @@ if sheet:
                 xaxis_title="현장명",
                 yaxis_title="인원 (명)",
                 legend_title="항목",
-                xaxis={'type': 'category'} # 현장명이 숫자로 인식되지 않도록 강제
+                xaxis={'type': 'category'}
             )
             st.plotly_chart(fig_man, use_container_width=True)
             
             st.divider()
             
-            # 3. [핵심 기능] 관리자 모드일 때 즉시 수정 가능하도록 Data Editor 배치
             st.subheader("📝 인력 투입 현황 데이터 수정")
             if user_role == "admin":
-                st.info("💡 차트의 데이터를 직접 수정하고 아래 [💾 저장] 버튼을 누르면 차트와 구글 시트에 즉시 반영됩니다.")
+                st.info("💡 표 하단의 '+' 버튼으로 행을 추가하거나, 숫자를 고친 뒤 [💾 저장]을 누르세요.")
                 col_config = {
                     "현장": None,
                     "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d 명"),
@@ -307,6 +345,7 @@ if sheet:
     with tab3:
         st.subheader("📋 프로젝트 상세 정보")
         if user_role == "admin":
+            st.info("💡 표 하단의 '+' 버튼을 눌러 새 현장을 추가할 수 있습니다. (단, 인력 데이터는 사이드바 '신규 현장 즉시 등록' 사용 권장)")
             column_config = {
                 "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
                 "전기 공정율": st.column_config.ProgressColumn("전기 %", min_value=0, max_value=100, format="%d%%"),
