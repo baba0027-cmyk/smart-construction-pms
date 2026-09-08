@@ -10,9 +10,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import io
-import requests
 
-# --- 0. [핵심] 자동 컬럼 교정 엔진 ---
+# --- 0. [엔진 고도화] 자동 컬럼 교정 엔진 (세분화 인력 지원) ---
 def fix_column_names(df):
     if df.empty: return df
     mapping = {
@@ -30,9 +29,11 @@ def fix_column_names(df):
         "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
         "이름": ["이름", "성함", "성명"],
         "현장": ["현장", "현장명", "대상현장"],
-        "용량": ["용량", "필요인원", "규모", "총인원"],
-        "근무일수": ["근무일수", "작업일수", "투입기간"],
-        "투입인원": ["투입인원", "현재인원", "투입인원수"]
+        # --- [추가] 세분화 인력 매핑 ---
+        "구조물 인원": ["구조물 인원", "구조물 인력", "구조물 투입", "구조물명"],
+        "전기 인원": ["전기 인원", "전기 인력", "전기 투입", "전기명"],
+        "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"],
+        "근무일수": ["근무일수", "작업일수", "투입기간"]
     }
     new_columns = {}
     for col in df.columns:
@@ -124,138 +125,105 @@ def handle_auth():
             st.sidebar.error("❌ 비밀번호가 틀렸습니다.")
     return user_role
 
-# --- 5. 유틸리티 기능 (날씨/엑셀/알림) ---
-def get_simulated_weather():
-    # 실제 운영 시에는 requests를 이용해 API 호출로 교체 가능
-    return {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람", "울산": "☀️ 맑음", "대전": "☁️ 흐림", "제주": "🌦️ 비", "세종": "☀️ 맑음", "창원": "☀️ 맑음"}
-
-def export_to_excel(df, filename):
+# --- 5. 유틸리티 ---
+def export_to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
-# --- 6. 메인 앱 실행 ---
-st.set_page_config(page_title="스마트 건설 PMS Pro", layout="wide", initial_sidebar_state="expanded")
+# --- 6. 메인 앱 ---
+st.set_page_config(page_title="스마트 건설 PMS Pro", layout="wide")
 
-# [알림 시스템] 위험 현장 체크
 sheet = connect_to_gsheets()
 if sheet:
     managers_df, projects_df = load_data_from_sheet()
-    
-    # 위험 알림 배너
-    if not projects_df.empty:
-        high_risk_sites = projects_df[projects_df['안전 등급'] == '위험']['현장명'].tolist()
-        stopped_sites = projects_df[projects_df['공정'] == '일시 중단']['현장명'].tolist()
-        if high_risk_sites or stopped_sites:
-            st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk_sites)}] 및 중단 현장 [{', '.join(stopped_sites)}]이 감지되었습니다!")
-
-    # 권한 관리
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
-    # --- 탭 구성 ---
-    tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 작업현황", "📋 프로젝트", "👥 인력/자원 관리"])
+    # [알림 시스템]
+    if not projects_df.empty:
+        high_risk = projects_df[projects_df['안전 등급'] == '위험']['현장명'].tolist()
+        if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
+
+    tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 현황", "📋 프로젝트", "👥 인력/자원 관리"])
 
     # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
         if not projects_df.empty:
             st.subheader("📈 실시간 프로젝트 요약")
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            
-            total_projects = len(projects_df)
-            avg_progress = projects_df[['구조물 공정율', '전기 공정율']].mean().mean()
-            total_manpower = managers_df['투입인원'].sum() if '투입인원' in managers_df.columns else 0
-            risk_count = len(projects_df[projects_df['안전 등급'] == '위험'])
-
-            kpi1.metric("총 현장 수", f"{total_projects} 개")
-            kpi2.metric("평균 공정율", f"{avg_progress:.1f}%")
-            kpi3.metric("총 투입 인원", f"{total_manpower} 명")
-            kpi4.metric("위험 현장", f"{risk_count} 개", delta_color="inverse")
+            kpi1.metric("총 현장 수", f"{len(projects_df)} 개")
+            kpi2.metric("평균 공정율", f"{projects_df[['구조물 공정율', '전기 공정율']].mean().mean():.1f}%")
+            kpi3.metric("총 투입 인원", f"{managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0} 명")
+            kpi4.metric("위험 현장", f"{len(projects_df[projects_df['안전 등급'] == '위험'])} 개", delta_color="inverse")
 
             st.divider()
-            
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                st.write("**🏗️ 현장별 공정 현황 (%)**")
-                fig_bar = px.bar(projects_df, x="현장명", y=["구조물 공정율", "전기 공정율"], barmode="group", color_discrete_sequence=["#1f77b4", "#ff7f0e"])
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                fig_bar = px.bar(projects_df, x="현장명", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 현황 (%)")
                 st.plotly_chart(fig_bar, use_container_width=True)
-            
-            with col_chart2:
-                st.write("**🛡️ 안전 등급 분포**")
-                fig_pie = px.pie(projects_df, names="안전 등급", color="안전 등급", color_discrete_map={"정상": "green", "주의": "orange", "위험": "red"})
+            with col_c2:
+                fig_pie = px.pie(projects_df, names="안전 등급", title="안전 등급 분포", color="안전 등급", color_discrete_map={"정상": "green", "주의": "orange", "위험": "red"})
                 st.plotly_chart(fig_pie, use_container_width=True)
-        else:
-            st.info("데이터가 없습니다.")
 
     # --- [Tab 1] 지도/날씨 ---
     with tab1:
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.subheader("📍 현장 위치 정보")
             m = folium.Map(location=[36.5, 127.5], zoom_start=7)
             for _, row in projects_df.iterrows():
                 if '위도' in row and '경도' in row and pd.notnull(row['위도']):
                     folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장명']).add_to(m)
             st_folium(m, width=700, height=450)
         with col2:
-            st.subheader("🌦️ 지역별 날씨 정보")
-            weather_data = get_simulated_weather()
-            for city, w in weather_data.items():
-                st.write(f"**{city}**: {w}")
+            st.subheader("🌦️ 지역별 날씨")
+            st.write("☀️ 서울: 맑음")
+            st.write("☁️ 부산: 흐림")
 
-    # --- [Tab 2] 작업현황 ---
+    # --- [Tab 2] 작업현황 (업그레이드: 인력 세분화 시각화) ---
     with tab2:
-        if '이름' in managers_df.columns and '상태' in managers_df.columns:
-            st.subheader("👷 소장님 실시간 상태 및 공정율")
-            status_list = []
-            for _, m_row in managers_df.iterrows():
-                name, status = m_row.get('이름', '이름없음'), m_row.get('상태', '정보없음')
-                struct_val, elec_val, txt = 0, 0, "🟢 휴식 중"
-                if status == '공사중':
-                    p_info = projects_df[projects_df['소장'] == name]
-                    if not p_info.empty:
-                        p = p_info.iloc[0]
-                        txt = f"{p['현장명']}"
-                        struct_val, elec_val = p.get('구조물 공정율', 0), p.get('전기 공정율', 0)
-                    else: txt = "현장 정보 없음"
-                status_list.append({"소장명": name, "상태": txt, "🏗️ 구조물(%)": struct_val, "⚡ 전기(%)": elec_val})
-            st.table(pd.DataFrame(status_list))
+        st.subheader("👷 현장별 인력 투입 구성 (구조물 vs 전기)")
+        
+        # [핵심] 인력 세분화 데이터가 있는지 확인
+        if '구조물 인원' in managers_df.columns and '전기 인원' in managers_df.columns:
+            # 차트용 데이터 가공 (현장별로 인원 구성 보여주기)
+            # managers_df가 '현장별 관리 모드'일 때를 가정
+            if not managers_df.empty:
+                fig_man = px.bar(managers_df, x="현장", y=["구조물 인원", "전기 인원"], 
+                                 title="현장별 공종별 투입 인원 구성",
+                                 barmode="stack",
+                                 color_discrete_map={"구조물 인원": "#1f77b4", "전기 인원": "#ff7f0e"})
+                st.plotly_chart(fig_man, use_container_width=True)
+                
+                st.write("**📊 상세 인력 현황 표**")
+                st.dataframe(managers_df[['현장', '구조물 인원', '전기 인원', '총 인원']], use_container_width=True)
+            else:
+                st.info("투입 인력 데이터가 없습니다.")
         else:
-            st.subheader("📊 현장별 인력 투입 현황")
-            display_cols = [c for c in ["현장", "용량", "근무일수", "투입인원"] if c in managers_df.columns]
-            st.dataframe(managers_df[display_cols], use_container_width=True)
+            # 기존 방식 (소장님 개인 관리 모드일 경우)
+            st.info("현재 '소장님 개인별 관리 모드'입니다. 현장별 인력 세분화 보기를 위해서는 '현장별 인력 투입 모드'로 전환하세요.")
+            st.dataframe(managers_df, use_container_width=True)
 
     # --- [Tab 3] 프로젝트 ---
     with tab3:
         st.subheader("📋 프로젝트 상세 정보")
         if user_role == "admin":
-            st.info("💡 관리자 모드: 데이터 수정 후 아래 버튼을 눌러 저장하세요.")
-            column_configuration = {
-                "위도": None, "경도": None,
-                "구조물 공정율": st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%"),
-                "전기 공정율": st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%"),
-                "안전 등급": st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"]),
+            column_config = {
+                "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
+                "전기 공정율": st.column_config.ProgressColumn("전기 %", min_value=0, max_value=100, format="%d%%"),
+                "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
                 "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             }
-            edited_projects = st.data_editor(projects_df, column_config=column_configuration, use_container_width=True)
-            
-            col_btn1, col_btn2 = st.columns([1, 5])
-            with col_btn1:
-                if st.button("💾 저장"):
-                    if save_data_to_sheet(sheet, managers_df, edited_projects):
-                        st.success("✅ 저장 완료!")
-                        st.rerun()
-            with col_btn2:
-                excel_data = export_to_excel(edited_projects, "projects_export.xlsx")
-                st.download_button(label="📥 엑셀 다운로드", data=excel_data, file_name="projects_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            edited_p = st.data_editor(projects_df, column_config=column_config, use_container_width=True)
+            if st.button("💾 프로젝트 변경사항 저장"):
+                if save_data_to_sheet(sheet, managers_df, edited_p):
+                    st.success("✅ 저장 완료!"); st.rerun()
+            st.download_button("📥 엑셀 다운로드", export_to_excel(projects_df), "projects.xlsx")
         else:
-            display_df = projects_df.drop(columns=['위도', '경도'], errors='ignore')
-            st.dataframe(display_df, use_container_width=True)
-            st.download_button(label="📥 엑셀 다운로드", data=export_to_excel(projects_df, "projects.xlsx"), file_name="projects_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
-    # --- [Tab 4] 인력/자원 관리 ---
+    # --- [Tab 4] 인력/자원 관리 (업그레이드: 세분화 입력) ---
     with tab4:
         st.subheader("👥 인력/자원 관리")
         if user_role == "admin":
@@ -263,26 +231,26 @@ if sheet:
                 st.info("💡 [소장님 개인별 관리 모드]")
                 st.data_editor(managers_df, use_container_width=True)
             else:
-                st.info("💡 [현장별 인력 투입 계획 모드]")
-                col_config = {}
-                if '용량' in managers_df.columns: col_config['용량'] = st.column_config.NumberColumn("용량", format="%d 명")
-                if '투입인원' in managers_df.columns: col_config['투입인원'] = st.column_config.NumberColumn("투입인원", format="%d 명")
-                if '근무일수' in managers_df.columns: col_config['근무일수'] = st.column_config.NumberColumn("근무일수", format="%d 일")
+                st.info("💡 [현장별 인력 투입 계획 모드] - 공종별 인원을 입력하세요.")
+                col_config = {
+                    "현장": None,
+                    "구조물 인원": st.column_config.NumberColumn("🏗️ 구조물 인원", format="%d 명"),
+                    "전기 인원": st.column_config.NumberColumn("⚡ 전기 인원", format="%d 명"),
+                    "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d 명")
+                }
+                edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True)
                 
-                edited_managers = st.data_editor(managers_df, use_container_width=True, column_config=col_config)
                 col_btn1, col_btn2 = st.columns([1, 5])
                 with col_btn1:
                     if st.button("💾 저장"):
-                        if save_data_to_sheet(sheet, edited_managers, projects_df):
-                            st.success("✅ 저장 완료!")
-                            st.rerun()
+                        if save_data_to_sheet(sheet, edited_m, projects_df):
+                            st.success("✅ 인력 계획이 저장되었습니다!"); st.rerun()
                 with col_btn2:
-                    st.download_button(label="📥 엑셀 다운로드", data=export_to_excel(edited_managers, "managers.xlsx"), file_name="manpower_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.download_button("📥 엑셀 다운로드", export_to_excel(managers_df), "manpower.xlsx")
         else:
             st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             st.dataframe(managers_df, use_container_width=True)
-            st.download_button(label="📥 엑셀 다운로드", data=export_to_excel(managers_df, "managers.xlsx"), file_name="manpower_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("📥 엑셀 다운로드", export_to_excel(managers_df), "manpower.xlsx")
 
 else:
     st.error("구글 시트 연결 실패")
-
