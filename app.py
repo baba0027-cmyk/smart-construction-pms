@@ -14,8 +14,6 @@ import io
 # --- 0. [엔진 교정] 중복 방지 및 정확한 매핑 엔진 ---
 def fix_column_names(df):
     if df.empty: return df
-    # 표준 이름을 KEY로, 그 외의 모든 변형을 VALUE(리스트)로 설정합니다.
-    # '현장명'을 포함한 모든 변형을 '현장'이라는 하나의 표준 이름으로 통일합니다.
     mapping = {
         "현장": ["현장", "현장명", "현장 이름", "현장명(명)", "대상현장"],
         "소장": ["소장", "현장소장", "소장명", "담당자"],
@@ -76,17 +74,13 @@ def load_data_from_sheet():
     sheet = connect_to_gsheets()
     if sheet is None: return pd.DataFrame(), pd.DataFrame()
     try:
-        # Managers 데이터
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = fix_column_names(managers_df)
-        
-        # 숫자형 컬럼 강제 변환 및 정화
         manpower_cols = ["예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
         for col in manpower_cols:
             if col in managers_df.columns:
                 managers_df[col] = pd.to_numeric(managers_df[col], errors='coerce').fillna(0)
         
-        # Projects 데이터
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = fix_column_names(projects_df)
         
@@ -96,7 +90,6 @@ def load_data_from_sheet():
             for col in ["구조물 공정율", "전기 공정율"]:
                 if col in projects_df.columns: projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
             
-            # [수정] desired_order의 '현장명'을 표준 이름인 '현장'으로 변경
             desired_order = ["현장", "소장", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
             existing_cols = [col for col in desired_order if col in projects_df.columns]
             extra_cols = [col for col in projects_df.columns if col not in existing_cols]
@@ -157,7 +150,6 @@ if sheet:
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
     if not projects_df.empty:
-        # [수정] '현장명' 대신 '현장' 사용
         high_risk = projects_df[projects_df['안전 등급'] == '위험']['현장'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
@@ -179,12 +171,17 @@ if sheet:
             st.divider()
             col_c1, col_c2 = st.columns(2)
             with col_c1:
-                # [수정] x="현장명" 대신 x="현장" 사용
                 fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 현황 (%)")
                 st.plotly_chart(fig_bar, use_container_width=True)
             with col_c2:
-                fig_pie = px.pie(projects_df, names="안전 등급", title="안전 등급 분포", color="안전 등급", color_discrete_map={"정상": "green", "주의": "orange", "위험": "red"})
-                st.plotly_chart(fig_pie, use_container_width=True)
+                # [수정] 안전 등급 분포를 Pie $\rightarrow$ Bar 차트로 변경
+                safety_counts = projects_df['안전 등급'].value_counts().reset_index()
+                safety_counts.columns = ['안전 등급', '현장 수']
+                fig_bar_safety = px.bar(safety_counts, x='안전 등급', y='현장 수', 
+                                        color='안전 등급',
+                                        color_discrete_map={"정상": "green", "주의": "orange", "위험": "red"},
+                                        title="안전 등급 분포 (현장 수)")
+                st.plotly_chart(fig_bar_safety, use_container_width=True)
 
     # --- [Tab 1] 지도/날씨 ---
     with tab1:
@@ -193,7 +190,6 @@ if sheet:
             m = folium.Map(location=[36.5, 127.5], zoom_start=7)
             for _, row in projects_df.iterrows():
                 if '위도' in row and '경도' in row and pd.notnull(row['위도']):
-                    # [수정] popup=row['현장명'] 대신 popup=row['현장'] 사용
                     folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장']).add_to(m)
             st_folium(m, width=700, height=450)
         with col2:
@@ -209,21 +205,56 @@ if sheet:
         missing_cols = [c for c in required_cols if c not in managers_df.columns]
         
         if not missing_cols:
+            # [수정] 데이터 구조 재편성: 비교를 위해 Pivot 형태로 변환
             melted_data = []
             for _, row in managers_df.iterrows():
                 site = row['현장']
-                melted_data.append({'현장': site, '구분': '계획(Plan)', '공종': '구조물', '인원': row['예정 구조물']})
-                melted_data.append({'현장': site, '구분': '계획(Plan)', '공종': '전기', '인원': row['예정 전기']})
-                melted_data.append({'현장': site, '구분': '누적(Actual)', '공종': '구조물', '인원': row['누적 구조물']})
-                melted_data.append({'현장': site, '구분': '누적(Actual)', '공종': '전기', '인원': row['누적 전기']})
+                melted_data.append({'현장': site, '공종': '구조물', '구분': '계획(Plan)', '인원': row['예정 구조물']})
+                melted_data.append({'현장': site, '공종': '구조물', '구분': '누적(Actual)', '인원': row['누적 구조물']})
+                melted_data.append({'현장': site, '공종': '전기', '구분': '계획(Plan)', '인원': row['예정 전기']})
+                melted_data.append({'현장': site, '공종': '전기', '구분': '누적(Actual)', '인원': row['누적 전기']})
             
             df_plot = pd.DataFrame(melted_data)
-            df_plot['현장_구분'] = df_plot['현장'] + " (" + df_plot['구분'] + ")"
+            # 현장 + 공종을 하나의 X축 라벨로 만들기
+            df_plot['X_Label'] = df_plot['현장'] + " (" + df_plot['공종'] + ")"
             
-            fig_man = px.bar(df_plot, x="현장_구분", y="인원", color="공종",
-                             title="현장별 인력 투입 계획 vs 실적 비교 (Stacked)",
-                             barmode="stack",
-                             color_discrete_map={"구조물": "#1f77b4", "전기": "#ff7f0e"})
+            # 비교를 위해 Pivot
+            df_pivot = df_plot.pivot(index='X_Label', columns='구분', values='인원').reset_index()
+            
+            # [핵심 로직] 누적이 계획보다 많으면 빨간색, 아니면 파란색
+            actual_colors = []
+            for _, row in df_pivot.iterrows():
+                if row['누적(Actual)'] > row['계획(Plan)']:
+                    actual_colors.append('#EF553B') # Red
+                else:
+                    actual_colors.append('#636EFA') # Blue
+            
+            # Plotly Graph Objects로 커스텀 차트 생성
+            fig_man = go.Figure()
+            
+            # 1. 계획(Plan) 막대 (연한 회색/파란색)
+            fig_man.add_trace(go.Bar(
+                x=df_pivot['X_Label'],
+                y=df_pivot['계획(Plan)'],
+                name='계획(Plan)',
+                marker_color='lightgrey'
+            ))
+            
+            # 2. 누적(Actual) 막대 (조건부 색상 적용)
+            fig_man.add_trace(go.Bar(
+                x=df_pivot['X_Label'],
+                y=df_pivot['누적(Actual)'],
+                name='누적(Actual)',
+                marker_color=actual_colors
+            ))
+            
+            fig_man.update_layout(
+                barmode='group',
+                title="현장별 인력 투입 계획 vs 실적 (🔴 빨간색: 계획 초과 발생!)",
+                xaxis_title="현장 (공종)",
+                yaxis_title="인원 (명)",
+                legend_title="구분"
+            )
             
             st.plotly_chart(fig_man, use_container_width=True)
             st.write("**📋 상세 인력 투입 현황 데이터**")
