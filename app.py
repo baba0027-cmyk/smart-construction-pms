@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- 0. [핵심] 자동 컬럼 교정 엔진 ---
+# --- 0. [핵심] 자동 컬럼 교정 엔진 (확장형) ---
 def fix_column_names(df):
     """구글 시트의 컬럼 이름이 제각각이어도 표준 이름으로 교정합니다."""
     if df.empty:
@@ -27,7 +27,12 @@ def fix_column_names(df):
         "상태": ["상태", "인력상태", "근무상태", "현장상태"],
         "구조물 공정율": ["구조물 공정율", "구조물공정율", "구조물%", "구조물 공정"],
         "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
-        "이름": ["이름", "성함", "성명"]
+        "이름": ["이름", "성함", "성명"],
+        # [신규] 인력 투입 계획용 매핑
+        "현장": ["현장", "현장명", "대상현장"],
+        "용량": ["용량", "필요인원", "규모", "총인원"],
+        "근무일수": ["근무일수", "작업일수", "투입기간"],
+        "투입인원": ["투입인원", "현재인원", "투입인원수"]
     }
     
     new_columns = {}
@@ -63,46 +68,32 @@ def connect_to_gsheets():
         st.error(f"구글 시트 연결 실패! 원인: {e}")
         return None
 
-# --- 2. 데이터 로드 및 [컬럼 순서 최적화] ---
+# --- 2. 데이터 로드 ---
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
     sheet = connect_to_gsheets()
     if sheet is None: return pd.DataFrame(), pd.DataFrame()
     
     try:
-        # 1. Managers 데이터 로드 및 교정
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = fix_column_names(managers_df)
         
-        # 2. Projects 데이터 로드 및 교정
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = fix_column_names(projects_df)
         
         if not projects_df.empty:
-            # [날짜/숫자 타입 정밀 교정]
             for col in ['공사 시작일', '종료일']:
                 if col in projects_df.columns:
                     projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
-            
             for col in ["구조물 공정율", "전기 공정율"]:
                 if col in projects_df.columns:
                     projects_df[col] = pd.to_numeric(projects_df[col], errors='coerce').fillna(0)
 
-            # -------------------------------------------------------
-            # [⭐ 핵심 추가] 프로젝트 컬럼 순서 최적화 로직
-            # -------------------------------------------------------
-            # 사용자가 원하는 순서 정의 (공정율 다음에 시작일/종료일 배치)
-            desired_order = [
-                "현장명", "소장", "위치", "안전 등급", "공정", 
-                "구조물 공정율", "전기 공정율", "공사 시작일", "종료일",
-                "위도", "경도"
-            ]
-            # 실제 데이터에 존재하는 컬럼만 필터링하여 순서 재배치
+            # 프로젝트 컬럼 순서 최적화
+            desired_order = ["현장명", "소장", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
             existing_cols = [col for col in desired_order if col in projects_df.columns]
-            # 만약 desired_order에 없는 컬럼이 있다면 맨 뒤에 붙임
             extra_cols = [col for col in projects_df.columns if col not in existing_cols]
             projects_df = projects_df[existing_cols + extra_cols]
-            # -------------------------------------------------------
 
         return managers_df, projects_df
     except Exception as e:
@@ -112,19 +103,16 @@ def load_data_from_sheet():
 # --- 3. 데이터 저장 ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
-        # 1. Managers 저장
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
         ws_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
         
-        # 2. Projects 저장
         ws_p = sheet.worksheet("projects")
         ws_p.clear()
         projects_copy = projects_df.copy()
         for col in ['공사 시작일', '종료일']:
             if col in projects_copy.columns:
                 projects_copy[col] = projects_copy[col].dt.strftime('%Y-%m-%d')
-        
         ws_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
         
         st.cache_data.clear()
@@ -138,7 +126,6 @@ def handle_auth():
     st.sidebar.title("🔐 접속 권한")
     auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
     user_role = "viewer"
-    
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password")
         admin_pw = st.secrets.get("ADMIN_PW", "1931")
@@ -158,27 +145,24 @@ sheet = connect_to_gsheets()
 
 if sheet:
     managers_df, projects_df = load_data_from_sheet()
-    
     if managers_df.empty and projects_df.empty:
-        st.warning("데이터를 불러올 수 없습니다. 구글 시트 내용을 확인하세요.")
+        st.warning("데이터를 불러올 수 없습니다.")
         st.stop()
 
     weather_data = {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람", "울산": "☀️ 맑음", "대전": "☁️ 흐림", "제주": "🌦️ 비", "세종": "☀️ 맑음", "창원": "☀️ 맑음"}
 
-    # --- 관리자용 기능 (사이드바) ---
+    # --- 관리자 사이드바 ---
     if user_role == "admin":
         st.sidebar.markdown("---")
         st.sidebar.header("➕ 새 프로젝트 배정")
         new_p_name = st.sidebar.text_input("현장명")
         
-        available_managers = []
-        if not managers_df.empty:
-            if '상태' in managers_df.columns and '이름' in managers_df.columns:
-                available_managers = managers_df[managers_df['상태'] == '휴식중']['이름'].tolist()
-            if not available_managers:
-                available_managers = managers_df['이름'].tolist() if '이름' in managers_df.columns else managers_df.iloc[:,0].tolist()
-
-        selected_manager = st.sidebar.selectbox("배정할 소장 선택", available_managers if available_managers else ["데이터 없음"])
+        # [스키마 적응형] 소장 선택 로직
+        if '이름' in managers_df.columns:
+            available_managers = managers_df['이름'].tolist()
+            selected_manager = st.sidebar.selectbox("배정할 소장 선택", available_managers)
+        else:
+            selected_manager = st.sidebar.text_input("배정할 소장명 (직접 입력)")
         
         new_p_location = st.sidebar.selectbox("위치(지역)", list(weather_data.keys()))
         new_p_start_date = st.sidebar.date_input("공사 시작일", datetime.now())
@@ -189,7 +173,6 @@ if sheet:
             if new_p_name:
                 loc_map = {"서울": (37.5665, 126.9780), "부산": (35.1796, 129.0756), "대구": (35.8714, 128.6014), "광주": (35.1595, 126.8526), "인천": (37.4563, 126.7052), "울산": (35.5384, 129.3114), "대전": (36.3504, 127.3845), "제주": (33.4890, 126.4983), "세종": (36.4800, 127.2890), "창원": (35.2271, 128.6811)}
                 lat, lon = loc_map.get(new_p_location, (36.5, 127.5))
-                
                 new_project = {
                     "현장명": new_p_name, "소장": selected_manager, "위치": new_p_location, 
                     "위도": lat, "경도": lon, "공사 시작일": pd.to_datetime(new_p_start_date),
@@ -197,17 +180,12 @@ if sheet:
                     "구조물 공정율": 0, "전기 공정율": 0
                 }
                 projects_df = pd.concat([projects_df, pd.DataFrame([new_project])], ignore_index=True)
-                
-                if '상태' in managers_df.columns and '이름' in managers_df.columns:
-                    managers_df.loc[managers_df['이름'] == selected_manager, '상태'] = '공사중'
-                
                 if save_data_to_sheet(sheet, managers_df, projects_df):
-                    st.sidebar.success(f"✅ {new_p_name} 배정 완료!")
+                    st.sidebar.success("✅ 배정 완료!")
                     st.rerun()
-            else:
-                st.sidebar.error("현장명을 입력해주세요.")
+            else: st.sidebar.error("현장명을 입력해주세요.")
 
-    # --- 메인 화면 탭 구성 ---
+    # --- 메인 탭 ---
     tab1, tab2, tab3, tab4 = st.tabs(["🗺️ 지도/날씨", "👷 작업현황", "📋 프로젝트", "👥 인력관리"])
 
     with tab1:
@@ -217,8 +195,7 @@ if sheet:
             m = folium.Map(location=[36.5, 127.5], zoom_start=7)
             for _, row in projects_df.iterrows():
                 if '위도' in row and '경도' in row and pd.notnull(row['위도']) and pd.notnull(row['경도']):
-                    try:
-                        folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장명'], tooltip=row['현장명']).add_to(m)
+                    try: folium.Marker([float(row['위도']), float(row['경도'])], popup=row['현장명']).add_to(m)
                     except: pass
             st_folium(m, width=700, height=400)
         with col2:
@@ -226,81 +203,71 @@ if sheet:
             for city, w in weather_data.items(): st.write(f"**{city}**: {w}")
 
     with tab2:
-        st.subheader("👷 소장님 실시간 상태 및 공정율")
-        status_list = []
-        for _, m_row in managers_df.iterrows():
-            name = m_row.get('이름', '이름없음')
-            status = m_row.get('상태', '정보없음')
-            struct_val, elec_val = 0, 0
-            txt = "🟢 휴식 중"
-            
-            if status == '공사중':
-                p_info = projects_df[projects_df['소장'] == name]
-                if not p_info.empty:
-                    p = p_info.iloc[0]
-                    if pd.notnull(p.get('종료일')):
+        # [스키마 적응형] 작업현황 탭 (개인별 vs 현장별 인력투입)
+        if '이름' in managers_df.columns and '상태' in managers_df.columns:
+            st.subheader("👷 소장님 실시간 상태 및 공정율")
+            status_list = []
+            for _, m_row in managers_df.iterrows():
+                name, status = m_row.get('이름', '이름없음'), m_row.get('상태', '정보없음')
+                struct_val, elec_val, txt = 0, 0, "🟢 휴식 중"
+                if status == '공사중':
+                    p_info = projects_df[projects_df['소장'] == name]
+                    if not p_info.empty:
+                        p = p_info.iloc[0]
                         try:
                             d_day = (pd.to_datetime(p['종료일']).date() - datetime.now().date()).days
                             txt = f"{p['현장명']} (D-{d_day})"
-                        except: txt = f"{p['현장명']} (날짜오류)"
-                    else:
-                        txt = f"{p['현장명']} (날짜미지정)"
-                    struct_val = p.get('구조물 공정율', 0)
-                    elec_val = p.get('전기 공정율', 0)
-                else: txt = "현장 정보 없음"
-            
-            status_list.append({
-                "소장명": name, 
-                "유형": m_row.get('유형', '-'), 
-                "상태": txt, 
-                "🏗️ 구조물(%)": struct_val, 
-                "⚡ 전기(%)": elec_val
-            })
-        st.table(pd.DataFrame(status_list))
+                        except: txt = f"{p['현장명']} (날짜미지정)"
+                        struct_val, elec_val = p.get('구조물 공정율', 0), p.get('전기 공정율', 0)
+                    else: txt = "현장 정보 없음"
+                status_list.append({"소장명": name, "유형": m_row.get('유형', '-'), "상태": txt, "🏗️ 구조물(%)": struct_val, "⚡ 전기(%)": elec_val})
+            st.table(pd.DataFrame(status_list))
+        else:
+            st.subheader("📊 현장별 인력 투입 현황")
+            if not managers_df.empty:
+                # 사용자가 요청한 컬럼만 보여줌
+                display_cols = [c for c in ["현장", "용량", "근무일수", "투입인원"] if c in managers_df.columns]
+                st.dataframe(managers_df[display_cols], use_container_width=True)
+            else: st.write("투입 계획 데이터가 없습니다.")
 
     with tab3:
         st.subheader("📋 프로젝트 전체 정보 관리")
         if user_role == "admin":
-            st.info("💡 관리자 모드: 표를 수정하고 아래 버튼을 눌러 저장하세요. (위도/경도는 숨겨져 있습니다)")
-            
-            column_configuration = {}
-            if "위도" in projects_df.columns: column_configuration["위도"] = None
-            if "경도" in projects_df.columns: column_configuration["경도"] = None
-            if "구조물 공정율" in projects_df.columns:
-                column_configuration["구조물 공정율"] = st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%")
-            if "전기 공정율" in projects_df.columns:
-                column_configuration["전기 공정율"] = st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%")
-            if "안전 등급" in projects_df.columns:
-                column_configuration["안전 등급"] = st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"])
-            if "공정" in projects_df.columns:
-                column_configuration["공정"] = st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
-            
+            st.info("💡 관리자 모드: 표를 수정하고 저장하세요.")
+            column_configuration = {
+                "위도": None, "경도": None,
+                "구조물 공정율": st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%"),
+                "전기 공정율": st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%"),
+                "안전 등급": st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"]),
+                "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
+            }
             edited_projects = st.data_editor(projects_df, column_config=column_configuration, use_container_width=True)
-            
-            if st.button("💾 프로젝트 변경사항 구글 시트에 저장"):
+            if st.button("💾 프로젝트 변경사항 저장"):
                 if save_data_to_sheet(sheet, managers_df, edited_projects):
-                    st.success("✅ 모든 프로젝트 정보가 저장되었습니다!")
+                    st.success("✅ 저장 완료!")
                     st.rerun()
         else:
-            st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             display_df = projects_df.drop(columns=['위도', '경도'], errors='ignore')
             st.dataframe(display_df, use_container_width=True)
 
     with tab4:
-        st.subheader("👥 인력 정보 관리")
+        st.subheader("👥 인력 투입/자원 관리")
         if user_role == "admin":
+            st.info("💡 인력 투입 계획을 관리합니다. (현장별 용량 및 투입인원)")
+            # [스키마 적응형] 데이터 에디터 설정
             col_config = {}
-            if '상태' in managers_df.columns:
-                col_config["상태"] = st.column_config.SelectboxColumn("상태", options=["공사중", "휴식중"])
-                
+            if '용량' in managers_df.columns: col_config['용량'] = st.column_config.NumberColumn("용량", format="%d 명")
+            if '투입인원' in managers_df.columns: col_config['투입인원'] = st.column_config.NumberColumn("투입인원", format="%d 명")
+            if '근무일수' in managers_df.columns: col_config['근무일수'] = st.column_config.NumberColumn("근무일수", format="%d 일")
+            
             edited_managers = st.data_editor(managers_df, num_rows="dynamic", use_container_width=True, column_config=col_config)
             if st.button("변경사항 구글 시트에 저장"):
                 if save_data_to_sheet(sheet, edited_managers, projects_df):
-                    st.success("✅ 인력 정보가 저장되었습니다!")
+                    st.success("✅ 인력 계획이 저장되었습니다!")
                     st.rerun()
         else:
             st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             st.dataframe(managers_df, use_container_width=True)
 
 else:
-    st.error("구글 시트 연결에 실패했습니다. Secrets 설정을 확인하세요.")
+    st.error("구글 시트 연결 실패")
