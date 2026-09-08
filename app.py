@@ -8,30 +8,34 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- 1. 구글 시트 연결 설정 (로컬 & 클라우드 하이브리드 방식) ---
+# --- 1. 구글 시트 연결 설정 (캐싱 적용) ---
+@st.cache_resource # 연결 객체는 한 번만 생성해서 계속 재사용합니다.
 def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # [최종 수정] 클라우드 환경(Secrets)에서 JSON 문자열을 읽어옵니다.
         if "gcp_json" in st.secrets:
             json_string = st.secrets["gcp_json"]
-            # [핵심 수정] strict=False 옵션을 추가하여 JSON 내부의 줄바꿈(엔터) 문자를 허용합니다.
             creds_dict = json.loads(json_string, strict=False)
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            # 로컬 테스트용
             creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
         
         client = gspread.authorize(creds)
+        # 시트 ID를 사용하여 직접 시트를 엽니다.
         sheet = client.open_by_key("1p-m_7hhsKMRacNlejARKExVtTfQrkAaJpZ_zm7_EZco") 
         return sheet
     except Exception as e:
         st.error(f"구글 시트 연결 실패! 원인: {e}")
-        st.info("💡 해결 팁: Secrets에 gcp_json = \"\"\" (JSON내용) \"\"\" 형식을 확인하세요.")
         return None
 
-# --- 2. 데이터 로드 함수 ---
-def load_data(sheet):
+# --- 2. 데이터 로드 함수 (캐싱 적용) ---
+@st.cache_data(ttl=300) # 데이터를 5분(300초) 동안 메모리에 저장합니다.
+def load_data(sheet_key):
+    # 캐싱을 위해 sheet 객체 대신 sheet_key(문자열)를 인자로 받습니다.
+    sheet = connect_to_gsheets()
+    if sheet is None:
+        return pd.DataFrame(), pd.DataFrame()
+    
     managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
     projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
     if not projects_df.empty:
@@ -40,24 +44,40 @@ def load_data(sheet):
 
 # --- 3. 데이터 저장 함수 ---
 def save_data(sheet, managers_df, projects_df):
-    worksheet_m = sheet.worksheet("managers")
-    worksheet_m.clear()
-    worksheet_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
-    
-    worksheet_p = sheet.worksheet("projects")
-    worksheet_p.clear()
-    projects_copy = projects_df.copy()
-    projects_copy['종료일'] = projects_copy['종료일'].dt.strftime('%Y-%m-%d')
-    worksheet_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
+    try:
+        worksheet_m = sheet.worksheet("managers")
+        worksheet_m.clear()
+        worksheet_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
+        
+        worksheet_p = sheet.worksheet("projects")
+        worksheet_p.clear()
+        projects_copy = projects_df.copy()
+        projects_copy['종료일'] = projects_copy['종료일'].dt.strftime('%Y-%m-%d')
+        worksheet_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
+        
+        # [핵심] 데이터를 저장했으니, 기존에 저장된 캐시를 삭제하여 다음 로딩 때 새 데이터를 가져오게 합니다.
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"저장 실패: {e}")
+        return False
 
 # --- 앱 시작 ---
 st.set_page_config(page_title="스마트 건설 PMS (Cloud)", layout="wide")
 st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 (Cloud)")
 
+# 시트 연결 (연결 객체는 캐싱됨)
 sheet = connect_to_gsheets()
+SHEET_KEY = "1p-m_7hhsKMRacNlejARKExVtTfQrkAaJpZ_zm7_EZco"
 
 if sheet:
-    managers_df, projects_df = load_data(sheet)
+    # 데이터 로드 (데이터는 5분간 캐싱됨)
+    managers_df, projects_df = load_data(SHEET_KEY)
+    
+    if managers_df.empty:
+        st.warning("데이터를 불러올 수 없습니다. 구글 시트 설정을 확인하세요.")
+        st.stop()
+
     weather_data = {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람"}
 
     # --- 사이드바: 새 프로젝트 배정 ---
@@ -88,9 +108,10 @@ if sheet:
             }
             projects_df = pd.concat([projects_df, pd.DataFrame([new_project])], ignore_index=True)
             managers_df.loc[managers_df['이름'] == selected_manager, '상태'] = '공사중'
-            save_data(sheet, managers_df, projects_df)
-            st.sidebar.success(f"✅ {new_p_name} 배정 완료!")
-            st.rerun()
+            
+            if save_data(sheet, managers_df, projects_df):
+                st.sidebar.success(f"✅ {new_p_name} 배정 완료!")
+                st.rerun()
         else:
             st.sidebar.error("현장명을 입력해주세요.")
 
@@ -141,9 +162,9 @@ if sheet:
             column_config={"상태": st.column_config.SelectboxColumn("상태", options=["공사중", "휴식중"], required=True)}
         )
         if st.button("변경사항 구글 시트에 저장"):
-            save_data(sheet, edited_managers, projects_df)
-            st.success("✅ 저장 완료!")
-            st.rerun()
+            if save_data(sheet, edited_managers, projects_df):
+                st.success("✅ 저장 완료!")
+                st.rerun()
 
 else:
     st.error("구글 시트 연결에 실패했습니다.")
