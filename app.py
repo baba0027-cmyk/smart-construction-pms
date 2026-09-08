@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import io
 
-# --- 0. [엔진 고도화] 자동 컬럼 교정 엔진 (세분화 인력 지원) ---
+# --- 0. [엔진 고도화] 자동 컬럼 교정 엔진 (4대 핵심 인력 지표 지원) ---
 def fix_column_names(df):
     if df.empty: return df
     mapping = {
@@ -29,11 +29,12 @@ def fix_column_names(df):
         "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
         "이름": ["이름", "성함", "성명"],
         "현장": ["현장", "현장명", "대상현장"],
-        # --- [추가] 세분화 인력 매핑 ---
-        "구조물 인원": ["구조물 인원", "구조물 인력", "구조물 투입", "구조물명"],
-        "전기 인원": ["전기 인원", "전기 인력", "전기 투입", "전기명"],
-        "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"],
-        "근무일수": ["근무일수", "작업일수", "투입기간"]
+        # --- [핵심] 예정/누적 세분화 매핑 ---
+        "예정 구조물": ["예정 구조물", "예정 구조물 인원", "계획 구조물", "예정 구조"],
+        "예정 전기": ["예정 전기", "예정 전기 인원", "계획 전기", "예정 전기"],
+        "누적 구조물": ["누적 구조물", "누적 구조물 인원", "실적 구조물", "누적 구조"],
+        "누적 전기": ["누적 전기", "누적 전기 인원", "실적 전기", "누적 전기"],
+        "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"]
     }
     new_columns = {}
     for col in df.columns:
@@ -110,7 +111,7 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
         st.error(f"저장 실패: {e}")
         return False
 
-# --- 4. 권한 관리 로직 ---
+# --- 4. 권한 관리 ---
 def handle_auth():
     st.sidebar.title("🔐 접속 권한")
     auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"])
@@ -141,12 +142,11 @@ if sheet:
     user_role = handle_auth()
     st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 Pro")
 
-    # [알림 시스템]
     if not projects_df.empty:
         high_risk = projects_df[projects_df['안전 등급'] == '위험']['현장명'].tolist()
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
-    tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 현황", "📋 프로젝트", "👥 인력/자원 관리"])
+    tab_dash, tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교 (Plan vs Act)", "📋 프로젝트", "👥 인력/자원 관리"])
 
     # --- [Tab 0] 종합 대시보드 ---
     with tab_dash:
@@ -181,29 +181,43 @@ if sheet:
             st.write("☀️ 서울: 맑음")
             st.write("☁️ 부산: 흐림")
 
-    # --- [Tab 2] 작업현황 (업그레이드: 인력 세분화 시각화) ---
+    # --- [Tab 2] 작업현황 (업그레이드: Plan vs Actual 비교 차트) ---
     with tab2:
-        st.subheader("👷 현장별 인력 투입 구성 (구조물 vs 전기)")
+        st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         
-        # [핵심] 인력 세분화 데이터가 있는지 확인
-        if '구조물 인원' in managers_df.columns and '전기 인원' in managers_df.columns:
-            # 차트용 데이터 가공 (현장별로 인원 구성 보여주기)
-            # managers_df가 '현장별 관리 모드'일 때를 가정
-            if not managers_df.empty:
-                fig_man = px.bar(managers_df, x="현장", y=["구조물 인원", "전기 인원"], 
-                                 title="현장별 공종별 투입 인원 구성",
-                                 barmode="stack",
-                                 color_discrete_map={"구조물 인원": "#1f77b4", "전기 인원": "#ff7f0e"})
-                st.plotly_chart(fig_man, use_container_width=True)
-                
-                st.write("**📊 상세 인력 현황 표**")
-                st.dataframe(managers_df[['현장', '구조물 인원', '전기 인원', '총 인원']], use_container_width=True)
-            else:
-                st.info("투입 인력 데이터가 없습니다.")
+        required_cols = ["현장", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기"]
+        if all(col in managers_df.columns for col in required_cols):
+            # [데이터 가공] Plotly Grouped-Stacked 차트를 위해 데이터를 변형(Melt)합니다.
+            # 각 현장별로 [계획(구조/전기)] 막대와 [누적(구조/전기)] 막대를 만듭니다.
+            
+            melted_data = []
+            for _, row in managers_df.iterrows():
+                site = row['현장']
+                # 계획 데이터
+                melted_data.append({'현장': site, '구분': '계획(Plan)', '공종': '구조물', '인원': row['예정 구조물']})
+                melted_data.append({'현장': site, '구분': '계획(Plan)', '공종': '전기', '인원': row['예정 전기']})
+                # 누적 데이터
+                melted_data.append({'현장': site, '구분': '누적(Actual)', '공종': '구조물', '인원': row['누적 구조물']})
+                melted_data.append({'현장': site, '구분': '누적(Actual)', '공종': '전기', '인원': row['누적 전기']})
+            
+            df_plot = pd.DataFrame(melted_data)
+
+            # 차트 생성: X축은 [현장 + 구분], Color는 [공종]
+            # 이렇게 하면 현장별로 '계획' 막대와 '누적' 막대가 나란히 서게 됩니다.
+            df_plot['현장_구분'] = df_plot['현장'] + " (" + df_plot['구분'] + ")"
+            
+            fig_man = px.bar(df_plot, x="현장_구분", y="인원", color="공종",
+                             title="현장별 인력 투입 계획 vs 실적 비교 (Stacked)",
+                             barmode="stack",
+                             color_discrete_map={"구조물": "#1f77b4", "전기": "#ff7f0e"})
+            
+            st.plotly_chart(fig_man, use_container_width=True)
+            
+            st.write("**📋 상세 인력 투입 현황 데이터**")
+            st.dataframe(managers_df[required_cols + (['총 인원'] if '총 인원' in managers_df.columns else [])], use_container_width=True)
         else:
-            # 기존 방식 (소장님 개인 관리 모드일 경우)
-            st.info("현재 '소장님 개인별 관리 모드'입니다. 현장별 인력 세분화 보기를 위해서는 '현장별 인력 투입 모드'로 전환하세요.")
-            st.dataframe(managers_df, use_container_width=True)
+            st.warning("⚠️ '예정 구조물', '예정 전기', '누적 구조물', '누적 전기' 컬럼이 필요합니다. '인력/자원 관리' 탭에서 데이터를 먼저 입력해 주세요.")
+            st.info("현재 데이터 컬럼: " + ", ".join(managers_df.columns))
 
     # --- [Tab 3] 프로젝트 ---
     with tab3:
@@ -223,19 +237,21 @@ if sheet:
         else:
             st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
 
-    # --- [Tab 4] 인력/자원 관리 (업그레이드: 세분화 입력) ---
+    # --- [Tab 4] 인력/자원 관리 (업그레이드: 4대 핵심 지표 입력) ---
     with tab4:
-        st.subheader("👥 인력/자원 관리")
+        st.subheader("👥 인력/자원 관리 (Plan & Actual)")
         if user_role == "admin":
             if '이름' in managers_df.columns:
                 st.info("💡 [소장님 개인별 관리 모드]")
                 st.data_editor(managers_df, use_container_width=True)
             else:
-                st.info("💡 [현장별 인력 투입 계획 모드] - 공종별 인원을 입력하세요.")
+                st.info("💡 [현장별 인력 투입 계획/실적 관리 모드]")
                 col_config = {
                     "현장": None,
-                    "구조물 인원": st.column_config.NumberColumn("🏗️ 구조물 인원", format="%d 명"),
-                    "전기 인원": st.column_config.NumberColumn("⚡ 전기 인원", format="%d 명"),
+                    "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d 명"),
+                    "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d 명"),
+                    "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d 명"),
+                    "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d 명"),
                     "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d 명")
                 }
                 edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True)
@@ -244,7 +260,7 @@ if sheet:
                 with col_btn1:
                     if st.button("💾 저장"):
                         if save_data_to_sheet(sheet, edited_m, projects_df):
-                            st.success("✅ 인력 계획이 저장되었습니다!"); st.rerun()
+                            st.success("✅ 인력 데이터가 저장되었습니다!"); st.rerun()
                 with col_btn2:
                     st.download_button("📥 엑셀 다운로드", export_to_excel(managers_df), "manpower.xlsx")
         else:
