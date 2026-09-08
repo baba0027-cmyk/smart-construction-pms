@@ -6,68 +6,63 @@ import folium
 from streamlit_folium import st_folium
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import json
 
-# --- 1. 구글 시트 연결 설정 (ID 반영 완료) ---
+# --- 1. 구글 시트 연결 설정 (로컬 & 클라우드 하이브리드 방식) ---
 def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # credentials.json 파일이 app.py와 같은 폴더에 있어야 합니다.
-        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-        client = gspread.authorize(creds)
+        # [핵심] 클라우드 환경(Secrets)인지 로컬 환경(File)인지 자동으로 판단합니다.
+        if "gcp_service_account" in st.secrets:
+            # 1. 클라우드 보안 금고(Secrets)에서 정보를 가져올 때
+            creds_dict = st.secrets["gcp_service_account"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        else:
+            # 2. 내 컴퓨터의 credentials.json 파일을 사용할 때 (로컬 테스트용)
+            creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
         
-        # 사용자님의 시트 ID가 이미 입력되었습니다!
+        client = gspread.authorize(creds)
         sheet = client.open_by_key("1p-m_7hhsKMRacNlejARKExVtTfQrkAaJpZ_zm7_EZco") 
         return sheet
     except Exception as e:
         st.error(f"구글 시트 연결 실패! 원인: {e}")
-        st.info("💡 해결 팁: 1. credentials.json 파일 확인 2. 구글 시트 공유 설정(편집자) 확인")
+        st.info("💡 해결 팁: 클라우드 배포 시에는 Streamlit Cloud의 'Secrets' 설정에 인증 정보가 입력되어 있어야 합니다.")
         return None
 
 # --- 2. 데이터 로드 함수 ---
 def load_data(sheet):
-    # managers 탭 데이터
     managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
-    # projects 탭 데이터
     projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
-    
-    # 날짜 형식 변환
     if not projects_df.empty:
         projects_df['종료일'] = pd.to_datetime(projects_df['종료일'])
     return managers_df, projects_df
 
 # --- 3. 데이터 저장 함수 ---
 def save_data(sheet, managers_df, projects_df):
-    # managers 데이터 저장
     worksheet_m = sheet.worksheet("managers")
     worksheet_m.clear()
     worksheet_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
     
-    # projects 데이터 저장
     worksheet_p = sheet.worksheet("projects")
     worksheet_p.clear()
     projects_copy = projects_df.copy()
-    # 날짜를 다시 문자열로 변환하여 저장 (구글 시트 호환성)
     projects_copy['종료일'] = projects_copy['종료일'].dt.strftime('%Y-%m-%d')
     worksheet_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
 
 # --- 앱 시작 ---
 st.set_page_config(page_title="스마트 건설 PMS (Cloud)", layout="wide")
-st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 (Google Sheets 연동)")
+st.title("🏗️ 스마트 건설 프로젝트 관리 시스템 (Cloud)")
 
 sheet = connect_to_gsheets()
 
 if sheet:
-    # 데이터 불러오기
     managers_df, projects_df = load_data(sheet)
-
-    # 가상 날씨 데이터
     weather_data = {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람"}
 
     # --- 사이드바: 새 프로젝트 배정 ---
     st.sidebar.header("➕ 새 프로젝트 배정")
     new_p_name = st.sidebar.text_input("현장명")
     
-    # '상태' 컬럼이 있는지 확인 후 필터링
     if '상태' in managers_df.columns:
         available_managers = managers_df[managers_df['상태'] == '휴식중']['이름'].tolist()
     else:
@@ -86,25 +81,20 @@ if sheet:
         if new_p_name:
             loc_map = {"서울": (37.5665, 126.9780), "부산": (35.1796, 129.0756), "대구": (35.8714, 128.6014), "광주": (35.1595, 126.8526), "인천": (37.4563, 126.7052)}
             lat, lon = loc_map[new_p_location]
-            
             new_project = {
                 "현장명": new_p_name, "소장": selected_manager, "위치": new_p_location, 
                 "위도": lat, "경도": lon, "공정": "준비 중", "종료일": pd.to_datetime(new_p_end_date)
             }
             projects_df = pd.concat([projects_df, pd.DataFrame([new_project])], ignore_index=True)
-            
-            # 소장 상태 변경
             managers_df.loc[managers_df['이름'] == selected_manager, '상태'] = '공사중'
-            
-            # 구글 시트에 저장
             save_data(sheet, managers_df, projects_df)
-            st.sidebar.success(f"✅ {new_p_name} 배정 및 시트 저장 완료!")
+            st.sidebar.success(f"✅ {new_p_name} 배정 완료!")
             st.rerun()
         else:
             st.sidebar.error("현장명을 입력해주세요.")
 
     # --- 메인 탭 구성 ---
-    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ 지도 & 날씨", "👷 작업 현황", "📋 프로젝트 리스트", "👥 인력 관리 (직접 수정)"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ 지도 & 날씨", "👷 작업 현황", "📋 프로젝트 리스트", "👥 인력 관리"])
 
     with tab1:
         col1, col2 = st.columns([2, 1])
@@ -142,24 +132,17 @@ if sheet:
             st.dataframe(df_display, use_container_width=True)
 
     with tab4:
-        st.subheader("👥 인력 정보 관리 (구글 시트와 동기화)")
-        st.info("💡 여기서 상태를 바꾸면 구글 시트에도 즉시 저장됩니다.")
-        
+        st.subheader("👥 인력 정보 관리")
         edited_managers = st.data_editor(
             managers_df,
             num_rows="dynamic",
             use_container_width=True,
-            column_config={
-                "상태": st.column_config.SelectboxColumn(
-                    "상태", options=["공사중", "휴식중"], required=True
-                )
-            }
+            column_config={"상태": st.column_config.SelectboxColumn("상태", options=["공사중", "휴식중"], required=True)}
         )
-        
         if st.button("변경사항 구글 시트에 저장"):
             save_data(sheet, edited_managers, projects_df)
-            st.success("✅ 구글 시트에 성공적으로 저장되었습니다!")
+            st.success("✅ 저장 완료!")
             st.rerun()
 
 else:
-    st.error("구글 시트 연결에 실패했습니다. 위 에러 메시지를 확인해 주세요.")
+    st.error("구글 시트 연결에 실패했습니다.")
