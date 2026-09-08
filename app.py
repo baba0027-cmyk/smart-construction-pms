@@ -13,13 +13,11 @@ import json
 def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # [안전 장치] st.secrets가 있는지, 그리고 그 안에 gcp_json이 있는지 아주 조심스럽게 확인합니다.
         use_secrets = False
         try:
             if "gcp_json" in st.secrets:
                 use_secrets = True
         except Exception:
-            # secrets 파일 자체가 없으면 바로 에러가 나므로 여기서 catch 합니다.
             pass
 
         if use_secrets:
@@ -75,7 +73,7 @@ def save_data(sheet, managers_df, projects_df):
         st.error(f"저장 실패: {e}")
         return False
 
-# --- 4. [수정됨] 로그인 및 권한 관리 로직 (에러 방지 완벽 적용) ---
+# --- 4. [수정됨] 로그인 및 권한 관리 로직 (비밀번호 1931 적용) ---
 def handle_auth():
     st.sidebar.title("🔐 접속 권한 설정")
     auth_mode = st.sidebar.radio("접속 모드를 선택하세요", ["조회자 (현황 공유용)", "관리자 (수정/관리용)"])
@@ -85,13 +83,14 @@ def handle_auth():
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password")
         
-        # [핵심 수정] st.secrets에 접근할 때 발생하는 에러를 원천 차단합니다.
-        admin_pw = "1234" # 기본값 설정
+        # [사용자 요청 반영] 기본 관리자 비밀번호를 1931로 설정합니다.
+        admin_pw = "1931" 
+        
+        # 혹시 나중에 클라우드 배포 시 Secrets에 비밀번호를 따로 설정한다면 그것을 우선 사용합니다.
         try:
             if "ADMIN_PW" in st.secrets:
                 admin_pw = st.secrets["ADMIN_PW"]
         except Exception:
-            # 금고 파일이 없으면 에러를 내지 않고 기본값(1234)을 유지합니다.
             pass
         
         if password == admin_pw:
