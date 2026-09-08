@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import io
 
-# --- 0. [엔진 고도화] 자동 컬럼 교정 엔진 (4대 핵심 인력 지표 지원) ---
+# --- 0. [엔진 고도화] 자동 컬럼 교정 엔진 ---
 def fix_column_names(df):
     if df.empty: return df
     mapping = {
@@ -29,7 +29,6 @@ def fix_column_names(df):
         "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
         "이름": ["이름", "성함", "성명"],
         "현장": ["현장", "현장명", "대상현장"],
-        # --- [핵심] 예정/누적 세분화 매핑 ---
         "예정 구조물": ["예정 구조물", "예정 구조물 인원", "계획 구조물", "예정 구조"],
         "예정 전기": ["예정 전기", "예정 전기 인원", "계획 전기", "예정 전기"],
         "누적 구조물": ["누적 구조물", "누적 구조물 인원", "실적 구조물", "누적 구조"],
@@ -66,14 +65,24 @@ def connect_to_gsheets():
         st.error(f"연결 실패: {e}")
         return None
 
-# --- 2. 데이터 로드 ---
+# --- 2. 데이터 로드 (에러 방지 로직 강화) ---
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
     sheet = connect_to_gsheets()
     if sheet is None: return pd.DataFrame(), pd.DataFrame()
     try:
+        # 1. Managers 데이터 로드 및 정화
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = fix_column_names(managers_df)
+        
+        # [핵심 수정] 숫자형 컬럼 강제 변환 (에러 방지)
+        manpower_cols = ["예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
+        for col in manpower_cols:
+            if col in managers_df.columns:
+                # 숫자가 아닌 값(글자, 공백 등)은 NaN으로 만들고, NaN은 0으로 채움
+                managers_df[col] = pd.to_numeric(managers_df[col], errors='coerce').fillna(0)
+        
+        # 2. Projects 데이터 로드 및 정화
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = fix_column_names(projects_df)
         
@@ -155,7 +164,11 @@ if sheet:
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
             kpi1.metric("총 현장 수", f"{len(projects_df)} 개")
             kpi2.metric("평균 공정율", f"{projects_df[['구조물 공정율', '전기 공정율']].mean().mean():.1f}%")
-            kpi3.metric("총 투입 인원", f"{managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0} 명")
+            
+            # [수정] 에러 방지를 위해 다시 한번 안전하게 계산
+            total_manpower = managers_df['총 인원'].sum() if '총 인원' in managers_df.columns else 0
+            kpi3.metric("총 투입 인원", f"{int(total_manpower)} 명")
+            
             kpi4.metric("위험 현장", f"{len(projects_df[projects_df['안전 등급'] == '위험'])} 개", delta_color="inverse")
 
             st.divider()
@@ -187,23 +200,15 @@ if sheet:
         
         required_cols = ["현장", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기"]
         if all(col in managers_df.columns for col in required_cols):
-            # [데이터 가공] Plotly Grouped-Stacked 차트를 위해 데이터를 변형(Melt)합니다.
-            # 각 현장별로 [계획(구조/전기)] 막대와 [누적(구조/전기)] 막대를 만듭니다.
-            
             melted_data = []
             for _, row in managers_df.iterrows():
                 site = row['현장']
-                # 계획 데이터
                 melted_data.append({'현장': site, '구분': '계획(Plan)', '공종': '구조물', '인원': row['예정 구조물']})
                 melted_data.append({'현장': site, '구분': '계획(Plan)', '공종': '전기', '인원': row['예정 전기']})
-                # 누적 데이터
                 melted_data.append({'현장': site, '구분': '누적(Actual)', '공종': '구조물', '인원': row['누적 구조물']})
                 melted_data.append({'현장': site, '구분': '누적(Actual)', '공종': '전기', '인원': row['누적 전기']})
             
             df_plot = pd.DataFrame(melted_data)
-
-            # 차트 생성: X축은 [현장 + 구분], Color는 [공종]
-            # 이렇게 하면 현장별로 '계획' 막대와 '누적' 막대가 나란히 서게 됩니다.
             df_plot['현장_구분'] = df_plot['현장'] + " (" + df_plot['구분'] + ")"
             
             fig_man = px.bar(df_plot, x="현장_구분", y="인원", color="공종",
@@ -212,7 +217,6 @@ if sheet:
                              color_discrete_map={"구조물": "#1f77b4", "전기": "#ff7f0e"})
             
             st.plotly_chart(fig_man, use_container_width=True)
-            
             st.write("**📋 상세 인력 투입 현황 데이터**")
             st.dataframe(managers_df[required_cols + (['총 인원'] if '총 인원' in managers_df.columns else [])], use_container_width=True)
         else:
