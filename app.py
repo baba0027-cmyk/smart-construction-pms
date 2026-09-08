@@ -8,7 +8,41 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- 1. 구글 시트 연결 (에러 자동 교정 및 캐싱 최적화) ---
+# --- 0. [핵심] 자동 컬럼 교정 엔진 ---
+def fix_column_names(df):
+    """구글 시트의 컬럼 이름이 제각각이어도 표준 이름으로 교정합니다."""
+    if df.empty:
+        return df
+    
+    # 매핑 규칙: { '표준이름': ['사용자가 쓸만한 이름들'] }
+    mapping = {
+        "현장명": ["현장명", "현장 이름", "현장명(명)"],
+        "소장": ["소장", "현장소장", "소장명", "담당자"],
+        "위치": ["위치", "현장위치", "지역"],
+        "위도": ["위도", "lat", "latitude"],
+        "경도": ["경도", "lon", "longitude"],
+        "공사 시작일": ["공사 시작일", "시작일", "공사시작일", "시작 예정일"],
+        "종료일": ["종료일", "종료(예정)일", "종료예정일", "종료일(예정)"],
+        "안전 등급": ["안전 등급", "안전등급", "안전", "안전상태"],
+        "공정": ["공정", "진행상태", "공정상태", "상태"],
+        "구조물 공정율": ["구조물 공정율", "구조물공정율", "구조물%", "구조물 공정"],
+        "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"]
+    }
+    
+    new_columns = {}
+    for col in df.columns:
+        found = False
+        for standard_name, aliases in mapping.items():
+            if col.strip() in aliases:
+                new_columns[col] = standard_name
+                found = True
+                break
+        if not found:
+            new_columns[col] = col # 매핑 안되면 그대로 유지
+            
+    return df.rename(columns=new_columns)
+
+# --- 1. 구글 시트 연결 ---
 @st.cache_resource
 def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -35,14 +69,19 @@ def load_data_from_sheet():
     if sheet is None: return pd.DataFrame(), pd.DataFrame()
     
     try:
+        # 데이터 로드 후 바로 컬럼 교정 적용
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
+        managers_df = fix_column_names(managers_df)
+        
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
+        projects_df = fix_column_names(projects_df)
         
         if not projects_df.empty:
-            # 날짜 형식 변환
+            # 날짜 형식 변환 (에러 방지를 위해 errors='coerce' 사용)
             for col in ['공사 시작일', '종료일']:
                 if col in projects_df.columns:
-                    projects_df[col] = pd.to_datetime(projects_df[col])
+                    projects_df[col] = pd.to_datetime(projects_df[col], errors='coerce')
+            
             # 공정율 숫자 변환
             for col in ["구조물 공정율", "전기 공정율"]:
                 if col in projects_df.columns:
@@ -55,17 +94,20 @@ def load_data_from_sheet():
 # --- 3. 데이터 저장 ---
 def save_data_to_sheet(sheet, managers_df, projects_df):
     try:
+        # 1. Managers 저장
         ws_m = sheet.worksheet("managers")
         ws_m.clear()
         ws_m.update([managers_df.columns.values.tolist()] + managers_df.values.tolist())
         
+        # 2. Projects 저장
         ws_p = sheet.worksheet("projects")
         ws_p.clear()
         projects_copy = projects_df.copy()
-        # 날짜를 다시 문자열로 변환하여 저장
+        # 날짜를 다시 문자열로 변환 (저장용)
         for col in ['공사 시작일', '종료일']:
             if col in projects_copy.columns:
                 projects_copy[col] = projects_copy[col].dt.strftime('%Y-%m-%d')
+        
         ws_p.update([projects_copy.columns.values.tolist()] + projects_copy.values.tolist())
         
         st.cache_data.clear()
@@ -101,7 +143,7 @@ if sheet:
     managers_df, projects_df = load_data_from_sheet()
     
     if managers_df.empty and projects_df.empty:
-        st.warning("데이터를 불러올 수 없습니다. 구글 시트 헤더 설정을 확인하세요.")
+        st.warning("데이터를 불러올 수 없습니다. 구글 시트 내용을 확인하세요.")
         st.stop()
 
     weather_data = {"서울": "☀️ 맑음", "부산": "☁️ 흐림", "대구": "🌧️ 비", "광주": "☀️ 맑음", "인천": "💨 바람", "울산": "☀️ 맑음", "대전": "☁️ 흐림", "제주": "🌦️ 비", "세종": "☀️ 맑음", "창원": "☀️ 맑음"}
@@ -168,8 +210,12 @@ if sheet:
                 p_info = projects_df[projects_df['소장'] == name]
                 if not p_info.empty:
                     p = p_info.iloc[0]
-                    d_day = (p['종료일'].date() - datetime.now().date()).days
-                    txt = f"{p['현장명']} (D-{d_day})"
+                    # 종료일이 날짜형인지 확인 후 D-day 계산
+                    if pd.notnull(p.get('종료일')):
+                        d_day = (pd.to_datetime(p['종료일']).date() - datetime.now().date()).days
+                        txt = f"{p['현장명']} (D-{d_day})"
+                    else:
+                        txt = f"{p['현장명']} (날짜미지정)"
                     struct_val = p.get('구조물 공정율', 0)
                     elec_val = p.get('전기 공정율', 0)
                 else: txt = "현장 정보 없음"
@@ -181,15 +227,18 @@ if sheet:
         if user_role == "admin":
             st.info("💡 관리자 모드: 표를 수정하고 아래 버튼을 눌러 저장하세요. (위도/경도는 숨겨져 있습니다)")
             
-            # [핵심] 위도와 경도는 데이터에는 있지만, 화면(Editor)에서는 보이지 않게 숨김 처리
-            column_configuration = {
-                "위도": None,
-                "경도": None,
-                "구조물 공정율": st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%"),
-                "전기 공정율": st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%"),
-                "안전 등급": st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"]),
-                "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
-            }
+            # [핵심] 컬럼 설정 (데이터가 있을 때만 적용되도록 안전하게 설계)
+            column_configuration = {}
+            if "위도" in projects_df.columns: column_configuration["위도"] = None
+            if "경도" in projects_df.columns: column_configuration["경도"] = None
+            if "구조물 공정율" in projects_df.columns:
+                column_configuration["구조물 공정율"] = st.column_config.ProgressColumn("구조물 공정율", min_value=0, max_value=100, format="%d%%")
+            if "전기 공정율" in projects_df.columns:
+                column_configuration["전기 공정율"] = st.column_config.ProgressColumn("전기 공정율", min_value=0, max_value=100, format="%d%%")
+            if "안전 등급" in projects_df.columns:
+                column_configuration["안전 등급"] = st.column_config.SelectboxColumn("안전 등급", options=["정상", "주의", "위험"])
+            if "공정" in projects_df.columns:
+                column_configuration["공정"] = st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
             
             edited_projects = st.data_editor(projects_df, column_config=column_configuration, use_container_width=True)
             
@@ -200,7 +249,8 @@ if sheet:
         else:
             st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             # 조회자에게도 위도/경도는 숨겨서 보여줌
-            st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
+            display_df = projects_df.drop(columns=['위도', '경도'], errors='ignore')
+            st.dataframe(display_df, use_container_width=True)
 
     with tab4:
         st.subheader("👥 인력 정보 관리")
