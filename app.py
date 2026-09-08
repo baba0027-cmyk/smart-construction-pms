@@ -75,7 +75,6 @@ def load_data_from_sheet():
     sheet = connect_to_gsheets()
     if sheet is None: return pd.DataFrame(), pd.DataFrame()
     try:
-        # [1] Managers 로드
         managers_df = pd.DataFrame(sheet.worksheet("managers").get_all_records())
         managers_df = fix_column_names(managers_df)
         manpower_cols = ["예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
@@ -83,7 +82,6 @@ def load_data_from_sheet():
             if col not in managers_df.columns: managers_df[col] = 0
             else: managers_df[col] = pd.to_numeric(managers_df[col], errors='coerce').fillna(0)
         
-        # [2] Projects 로드
         projects_df = pd.DataFrame(sheet.worksheet("projects").get_all_records())
         projects_df = fix_column_names(projects_df)
         
@@ -209,7 +207,7 @@ if sheet:
             st.subheader("🌦️ 지역별 날씨")
             st.write("☀️ 서울: 맑음")
 
-    # --- [Tab 2] 인력 투입 비교 (개선됨) ---
+    # --- [Tab 2] 인력 투입 비교 (개선됨: 현장명 중심 & 그룹화) ---
     with tab2:
         st.subheader("📊 현장별 인력 투입 분석 (계획 vs 누적)")
         
@@ -217,34 +215,66 @@ if sheet:
         missing_cols = [c for c in required_cols if c not in managers_df.columns]
         
         if not missing_cols:
-            # 1. 차트용 데이터 가공
+            # 1. 데이터 가공: 각 현장별로 4개의 데이터 포인트를 만듭니다.
             melted_data = []
             for _, row in managers_df.iterrows():
-                site = row['현장']
+                site = str(row['현장'])
+                # (구조물 - 계획), (구조물 - 누적), (전기 - 계획), (전기 - 누적)
                 melted_data.append({'현장': site, '공종': '구조물', '구분': '계획(Plan)', '인원': row['예정 구조물']})
                 melted_data.append({'현장': site, '공종': '구조물', '구분': '누적(Actual)', '인원': row['누적 구조물']})
                 melted_data.append({'현장': site, '공종': '전기', '구분': '계획(Plan)', '인원': row['예정 전기']})
                 melted_data.append({'현장': site, '공종': '전기', '구분': '누적(Actual)', '인원': row['누적 전기']})
             
             df_plot = pd.DataFrame(melted_data)
-            df_plot['X_Label'] = df_plot['현장'].astype(str) + " (" + df_plot['공종'] + ")"
-            df_pivot = df_plot.pivot(index='X_Label', columns='구분', values='인원').reset_index()
-            
-            # 2. [핵심 기능] 계획 대비 초과 시 빨간색 적용 로직
-            actual_colors = []
-            for _, row in df_pivot.iterrows():
-                if row['누적(Actual)'] > row['계획(Plan)']:
-                    actual_colors.append('#EF553B') # 🔴 Red (초과)
-                else:
-                    actual_colors.append('#636EFA') # 🔵 Blue (정상)
-            
+
+            # 2. 차트 생성 (go.Figure 사용)
+            # X축을 '현장'으로 고정하고, 각 항목별로 Trace를 만들어 그룹화합니다.
             fig_man = go.Figure()
-            fig_man.add_trace(go.Bar(x=df_pivot['X_Label'], y=df_pivot['계획(Plan)'], name='계획(Plan)', marker_color='lightgrey'))
-            fig_man.add_trace(go.Bar(x=df_pivot['X_Label'], y=df_pivot['누적(Actual)'], name='누적(Actual)', marker_color=actual_colors))
+
+            # 항목 정의: (공종, 구분, 색상_Base, 이름)
+            # '누적(Actual)'의 경우 계획보다 많으면 빨간색으로 만들기 위해 별도 로직 적용
             
+            # --- Trace 1: 구조물 계획 (회색) ---
+            df_struct_plan = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='계획(Plan)')]
+            fig_man.add_trace(go.Bar(x=df_struct_plan['현장'], y=df_struct_plan['인원'], name='🏗️ 구조물(계획)', marker_color='#D3D3D3'))
+
+            # --- Trace 2: 구조물 누적 (파랑 or 빨강) ---
+            df_struct_act = df_plot[(df_plot['공종']=='구조물') & (df_plot['구분']=='누적(Actual)')]
+            # 계획 대비 초과 여부 확인을 위해 원래 managers_df와 조인
+            # (여기서는 단순화를 위해 df_plot 내에서 비교 로직을 쓸 수 있음)
+            struct_act_colors = []
+            for _, row in df_struct_act.iterrows():
+                plan_val = df_plot[(df_plot['현장']==row['현장']) & (df_plot['공종']=='구조물') & (df_plot['구분']=='계획(Plan) ')]['인원'].values
+                # 위 코드는 인덱싱 이슈가 있을 수 있으니 안전하게 managers_df에서 가져옴
+                orig_row = managers_df[managers_df['현장'] == row['현장']]
+                if not orig_row.empty and row['인원'] > orig_row['예정 구조물'].values[0]:
+                    struct_act_colors.append('#EF553B') # 🔴 Red
+                else:
+                    struct_act_colors.append('#636EFA') # 🔵 Blue
+            fig_man.add_trace(go.Bar(x=df_struct_act['현장'], y=df_struct_act['인원'], name='🏗️ 구조물(누적)', marker_color=struct_act_colors))
+
+            # --- Trace 3: 전기 계획 (회색) ---
+            df_elec_plan = df_plot[(df_plot['공종']=='전기') & (df_plot['구분']=='계획(Plan)')]
+            fig_man.add_trace(go.Bar(x=df_elec_plan['현장'], y=df_elec_plan['인원'], name='⚡ 전기(계획)', marker_color='#D3D3D3'))
+
+            # --- Trace 4: 전기 누적 (파랑 or 빨강) ---
+            df_elec_act = df_plot[(df_plot['공종']=='전기') & (df_plot['구분']=='누적(Actual)')]
+            elec_act_colors = []
+            for _, row in df_elec_act.iterrows():
+                orig_row = managers_df[managers_df['현장'] == row['현장']]
+                if not orig_row.empty and row['인원'] > orig_row['예정 전기'].values[0]:
+                    elec_act_colors.append('#EF553B') # 🔴 Red
+                else:
+                    elec_act_colors.append('#636EFA') # 🔵 Blue
+            fig_man.add_trace(go.Bar(x=df_elec_act['현장'], y=df_elec_act['인원'], name='⚡ 전기(누적)', marker_color=elec_act_colors))
+
             fig_man.update_layout(
-                barmode='group', title="현장별 인력 투입 계획 vs 실적 (🔴 빨간색: 계획 초과!)",
-                xaxis_title="현장 (공종)", yaxis_title="인원 (명)", legend_title="구분"
+                barmode='group',
+                title="현장별 인력 투입 현황 (🔴 빨간색: 계획 인원 초과!)",
+                xaxis_title="현장명",
+                yaxis_title="인원 (명)",
+                legend_title="항목",
+                xaxis={'type': 'category'} # 현장명이 숫자로 인식되지 않도록 강제
             )
             st.plotly_chart(fig_man, use_container_width=True)
             
@@ -262,7 +292,6 @@ if sheet:
                     "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d 명"),
                     "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d 명")
                 }
-                # Tab 2 전용 에디터 (Key를 다르게 설정하여 Tab 4와 충돌 방지)
                 edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
                 
                 if st.button("💾 변경사항 구글 시트에 저장"):
@@ -321,6 +350,7 @@ if sheet:
         else:
             st.warning("⚠️ 조회자 모드: 데이터는 읽기 전용입니다.")
             st.dataframe(managers_df, use_container_width=True)
+            st.download_button("📥 엑셀 다운로드", export_to_excel(managers_df), "manpower.xlsx")
 
 else:
     st.error("구글 시트 연결 실패")
