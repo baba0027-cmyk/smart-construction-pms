@@ -4,243 +4,486 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import folium
+from streamlit_folium import st_folium
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
+import io
+import requests
 
-# ==========================================
-# 1. 페이지 설정 및 기본 구성
-# ==========================================
-st.set_page_config(
-    layout="wide", 
-    page_title="AI 프로젝트 관리 인텔리전스",
-    page_icon="📊"
-)
+try:
+    from geopy.geocoders import Nominatim
+    from geopy.extra.rate_limiter import RateLimiter
+    HAS_GEOPY = True
+except ImportError:
+    HAS_GEOPY = False
 
-# 커스텀 CSS (UI 개선)
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 5px 5px 0px 0px; padding: 10px 20px; }
-    .stTabs [aria-selected="true"] { background-color: #0e1117; color: white; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- 0. [Constants & Schema] ---
+PROJECTS_SCHEMA = [
+    "현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", 
+    "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", 
+    "위도", "경도", "예산 (KRW)", "실제 집행 비용 (KRW)"
+]
+MANAGERS_SCHEMA = ["현장", "소장", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
 
-# ==========================================
-# 2. 데이터 로딩 및 Mock 데이터 생성 (Fallback)
-# ==========================================
-def generate_mock_data():
-    """모든 지능형 기능을 테스트하기 위한 고도화된 한국어 샘플 데이터 생성"""
-    np.random.seed(42)
-    n_projects = 15
+COLUMN_MAPPING = {
+    "현장": ["현장", "현장명", "현장 이름", "현장명(명)", "대상현장"],
+    "소장": ["소장", "현장소장", "소장명", "담당자", "이름", "성함", "성명"],
+    "위치": ["위치", "현장위치", "지역"],
+    "위도": ["위도", "lat", "latitude"],
+    "경도": ["경도", "lon", "longitude"],
+    "공사 시작일": ["공사 시작일", "시작일", "공사시작일", "시작 예정일"],
+    "종료일": ["종료일", "종료(예정)일", "종료예정일", "종료일(예정)"],
+    "안전 등급": ["안전 등급", "안전등급", "안전", "안전상태"],
+    "공정": ["공정", "진행상태", "공정상태", "프로젝트상태"],
+    "구조물 공정율": ["구조물 공정율", "구조물공정율", "구조물%", "구조물 공정"],
+    "전기 공정율": ["전기 공정율", "전기공정율", "전기%", "전기 공정"],
+    "예정 구조물": ["예정 구조물", "예정 구조물 인원", "계획 구조물", "예정 구조"],
+    "예정 전기": ["예정 전기", "예정 전기 인원", "계획 전기", "예정 전기"],
+    "누적 구조물": ["누적 구조물", "누적 구조물 인원", "실적 구조물", "누적 구조"],
+    "누적 전기": ["누적 전기", "누적 전기 인원", "실적 전기", "누적 전기"],
+    "총 인원": ["총 인원", "합계 인원", "전체 인원", "투입인원", "투입인원수"],
+    "용량 (MW)": ["용량 (MW)", "용량(MW)", "MW", "용량", "규모"],
+    "예산 (KRW)": ["예산", "예산(원)", "Budget", "예산금액"],
+    "실제 집행 비용 (KRW)": ["실제 집행 비용", "실제비용", "집행액", "실제 사용액", "Actual Cost"]
+}
+
+NUMERIC_COLS = ["용량 (MW)", "구조물 공정율", "전기 공정율", "예정 구조물", "예정 전기", 
+                "누적 구조물", "누적 전기", "총 인원", "예산 (KRW)", "실제 집행 비용 (KRW)"]
+
+# --- 1. [Engine] 데이터 및 예측 엔진 ---
+
+def calculate_managers_totals(df):
+    if df.empty: return df
+    for col in ["누적 구조물", "누적 전기"]:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+    df["총 인원"] = df["누적 구조물"] + df["누적 전기"]
+    return df
+
+def standardize_dataframe(df, schema):
+    if df.empty: return pd.DataFrame(columns=schema)
+    new_columns = {}
+    for col in df.columns:
+        clean_col = str(col).strip()
+        found = False
+        for standard_name, aliases in COLUMN_MAPPING.items():
+            if clean_col in aliases:
+                new_columns[col] = standard_name
+                found = True
+                break
+        if not found: new_columns[col] = col
+    df = df.rename(columns=new_columns)
+    new_df = pd.DataFrame(index=df.index, columns=schema)
+    for col in schema:
+        if col in df.columns:
+            if col in NUMERIC_COLS:
+                new_df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            elif col in ["공사 시작일", "종료일"]:
+                new_df[col] = pd.to_datetime(df[col], errors='coerce')
+            elif col in ["위도", "경도"]:
+                new_df[col] = pd.to_numeric(df[col], errors='coerce').fillna(36.5)
+            else:
+                new_df[col] = df[col].fillna("").astype(object)
+        else:
+            if col in NUMERIC_COLS: new_df[col] = 0.0
+            elif col in ["공사 시작일", "종료일"]: new_df[col] = datetime.now()
+            elif col in ["위도", "경도"]: new_df[col] = 36.5
+            else: new_df[col] = ""
+    if "공사 시작일" in new_df.columns: new_df["공사 시작일"] = new_df["공사 시작일"].fillna(datetime.now())
+    if "종료일" in new_df.columns: new_df["종료일"] = new_df["종료일"].fillna(datetime.now())
+    if "총 인원" in new_df.columns: new_df = calculate_managers_totals(new_df)
+    return new_df
+
+@st.cache_data(ttl=600)
+def fetch_weather_info(location="Seoul"):
+    try:
+        url = f"https://wttr.in/{location}?format=j1"
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            curr = data['current_condition'][0]
+            return {"temp": curr['temp_C'], "desc": curr['weatherDesc'][0]['value'], "humidity": curr['humidity']}
+    except: pass
+    return None
+
+# [Phase 2.1 핵심] 예측 엔진: 공정 속도 기반 종료일 계산 및 리스크 산출
+def analyze_project_projections(df):
+    if df.empty: return df
+    proj_df = df.copy()
+    today = datetime.now()
     
-    projects = []
-    locations = ['서울', '부산', '인천', '대구', '광주', '대전', '울산']
-    
-    for i in range(n_projects):
-        start_date = datetime(2024, 1, 1) + timedelta(days=np.random.randint(0, 365))
-        duration = np.random.randint(30, 200)
-        end_date = start_date + timedelta(days=duration)
-        progress = np.random.uniform(0.1, 0.95)
-        contract_amount = np.random.randint(50000000, 500000000) # 계약 금액 (KRW)
-        actual_cost = contract_amount * np.random.uniform(0.4, 0.9)
+    projections = []
+    for _, row in proj_df.iterrows():
+        start_date = row['공사 시작일']
+        end_date_plan = row['종료일']
+        # 평균 공정율 (구조물과 전기의 평균)
+        avg_prog = (row['구조물 공정율'] + row['전기 공정율']) / 2
         
-        projects.append({
-            '프로젝트명': f'프로젝트 {chr(65+i)}',
-            '시작일': start_date.strftime('%Y-%m-%d'),
-            '종료일': end_date.strftime('%Y-%m-%d'),
-            '진행률': progress,
-            '계약 금액 (KRW)': contract_amount,
-            '실행 비용 (KRW)': actual_cost,
-            '위치': np.random.choice(locations),
-            '투입 인력 (명)': np.random.randint(3, 15),
-            '목표 인력 (명)': np.random.randint(5, 15),
-            '리스크 요인': np.random.choice(['낮음', '보통', '높음'], p=[0.5, 0.3, 0.2]),
-            '상태': np.random.choice(['진행중', '지연', '완료'], p=[0.6, 0.2, 0.2])
+        # 경과 일수 계산 (최소 1일로 설정하여 0 나누기 방지)
+        days_passed = (today - start_date).days
+        if days_passed <= 0: days_passed = 1
+        
+        # 하루 평균 공정 진행률 (%)
+        daily_speed = avg_prog / days_passed
+        
+        # 남은 공정 수행에 필요한 일수 계산
+        remaining_prog = 100 - avg_prog
+        if daily_speed > 0:
+            days_to_finish = remaining_prog / daily_speed
+        else:
+            days_to_finish = 365 # 속도가 0이면 1년 지연으로 간주 (Stalled)
+
+        est_end_date = today + timedelta(days=int(days_to_finish))
+        delay_days = (est_end_date - end_date_plan).days
+        
+        # 리스크 점수 계산 (0 ~ 100)
+        # 1. 지연 리스크 (지연일수에 비례)
+        delay_risk = min(max(delay_days * 2, 0), 50) 
+        # 2. 안전 리스크
+        safety_risk = 50 if row['안전 등급'] == '위험' else 0
+        # 3. 재무 리스크 (예산 초과 시)
+        budget_risk = 0
+        if row['예산 (KRW)'] > 0:
+            usage_rate = row['실제 집행 비용 (KRW)'] / row['예산 (KRW)']
+            if usage_rate > 0.9: budget_risk = min((usage_rate - 0.9) * 200, 50)
+            
+        risk_score = delay_risk + safety_risk + budget_risk
+        
+        projections.append({
+            "예상 종료일": est_end_date,
+            "지연 예상(일)": delay_days,
+            "리스크 점수": min(risk_score, 100),
+            "진행 속도(일/%)": round(daily_speed, 3)
         })
     
-    return pd.DataFrame(projects)
+    proj_results = pd.DataFrame(projections, index=df.index)
+    return pd.concat([proj_df, proj_results], axis=1)
 
-def load_data():
-    """Google Sheets 연결 시도 및 실패 시 Mock 데이터 반환"""
+# --- 2. Google Sheets Connection ---
+@st.cache_resource
+def connect_to_gsheets():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # 실제 운영 시에는 아래 주석을 해제하고 Google Sheets 연결 설정을 사용하세요.
-        # conn = st.connection("gsheets", type="gsheets")
-        # df = conn.read()
-        # return df
-        raise Exception("연결 설정되지 않음")
-    except Exception:
-        return generate_mock_data()
+        if "gcp_json" in st.secrets:
+            creds_dict = json.loads(st.secrets["gcp_json"])
+            if "private_key" in creds_dict: creds_dict["private_key"] = creds_dict["private_key"].replace('\\n', '\n')
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        else:
+            creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key("1p-m_7hhsKMRacNlejARKExVtTfQrkAaJpZ_zm7_EZco") 
+        return sheet
+    except Exception as e:
+        st.error(f"연결 실패: {e}")
+        return None
 
-# ==========================================
-# 3. 핵심 분석 엔진 (Intelligence Engines)
-# ==========================================
+# --- 3. Data Loading ---
+@st.cache_data(ttl=300)
+def load_data_from_sheet():
+    sheet = connect_to_gsheets()
+    if sheet is None: return pd.DataFrame(columns=MANAGERS_SCHEMA), pd.DataFrame(columns=PROJECTS_SCHEMA)
+    try:
+        raw_m = pd.DataFrame(sheet.worksheet("managers").get_all_records())
+        managers_df = standardize_dataframe(raw_m, MANAGERS_SCHEMA)
+        raw_p = pd.DataFrame(sheet.worksheet("projects").get_all_records())
+        projects_df = standardize_dataframe(raw_p, PROJECTS_SCHEMA)
+        return managers_df, projects_df
+    except Exception as e:
+        st.error(f"데이터 로드 중 오류 발생: {e}")
+        return pd.DataFrame(columns=MANAGERS_SCHEMA), pd.DataFrame(columns=PROJECTS_SCHEMA)
 
-def engine_predictive_risk(df):
-    """Phase 2.1: 예측 엔진 - 리스크 점수 및 예상 종료일 계산"""
-    df = df.copy()
-    df['시작일'] = pd.to_datetime(df['시작일'])
-    df['종료일'] = pd.to_datetime(df['종료일'])
-    
-    total_days = (df['종료일'] - df['시작일']).dt.days
-    elapsed_days = (pd.Timestamp.now() - df['시작일']).dt.days
-    time_progress = elapsed_days / total_days
-    
-    risk_score = (time_progress - df['진행률']) * 100
-    risk_score = risk_score.clip(lower=0)
-    
-    risk_map = {'낮음': 0, '보통': 15, '높음': 30}
-    df['리스크 점수'] = risk_score + df['리스크 요인'].map(risk_map)
-    
-    df['예상 종료일'] = df['종료일'] + pd.to_timedelta(df['리스크 점수'] * 2, unit='D')
-    return df
+def save_data_to_sheet(sheet, managers_df, projects_df):
+    try:
+        managers_df = calculate_managers_totals(managers_df.copy())
+        m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
+        p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
+        for col in ['공사 시작일', '종료일']:
+            if col in p_clean.columns:
+                p_clean[col] = p_clean[col].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (datetime, pd.Timestamp)) else x)
+        ws_m = sheet.worksheet("managers"); ws_m.clear()
+        ws_m.update([m_clean.columns.tolist()] + m_clean.values.tolist())
+        ws_p = sheet.worksheet("projects"); ws_p.clear()
+        ws_p.update([p_clean.columns.tolist()] + p_clean.values.tolist())
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"저장 실패: {e}")
+        return False
 
-def engine_labor_optimization(df):
-    """Phase 2.2: 인력 최적화 - 불균형 및 재배치 제안"""
-    df = df.copy()
-    df['인력 불균형'] = df['투입 인력 (명)'] - df['목표 인력 (명)']
-    
-    def suggest_action(diff):
-        if diff < -2: return "⚠️ 인력 충원 필요"
-        elif diff > 2: return "💡 인력 재배치 가능"
-        else: return "✅ 적정 인력"
-    
-    df['인력 최적화 제안'] = df['인력 불균형'].apply(suggest_action)
-    return df
+# --- 4. Auth & Utils ---
+def handle_auth():
+    st.sidebar.title("🔐 접속 권한")
+    auth_mode = st.sidebar.radio("접속 모드", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"], key="auth_radio")
+    user_role = "viewer"
+    if auth_mode == "관리자 (수정/관리용)":
+        password = st.sidebar.text_input("비밀번호", type="password", key="admin_pw_input")
+        if password == st.secrets.get("ADMIN_PW", "1931"):
+            user_role = "admin"
+            st.sidebar.success("✅ 관리자 모드")
+        elif password != "": st.sidebar.error("❌ 비밀번호 오류")
+    return user_role
 
-def engine_financial_intelligence(df):
-    """Phase 2.3: 재무 지능 - 수익성 및 비용 예측"""
-    df = df.copy()
-    df['수익금'] = df['계약 금액 (KRW)'] - df['실행 비용 (KRW)']
-    df['수익률 (%)'] = (df['수익금'] / df['계약 금액 (KRW)']) * 100
-    df['예상 최종 비용 (KRW)'] = df['실행 비용 (KRW)'] * (1 + (1 - df['진행률']))
-    return df
+def export_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
 
-# ==========================================
-# 4. 메인 앱 실행 및 UI 렌더링
-# ==========================================
+# --- 5. Main App ---
+st.set_page_config(page_title="스타쏠라 프로젝트 관리", layout="wide")
 
-def main():
-    st.title("🚀 AI 프로젝트 관리 인텔리전스")
-    st.subheader("통합 예측 및 재무 분석 대시보드")
+sheet = connect_to_gsheets()
+if sheet:
+    managers_df, projects_df = load_data_from_sheet()
+    if 'master_p_df' not in st.session_state or st.session_state.get('needs_sync', False):
+        st.session_state.master_p_df = projects_df
+        st.session_state.needs_sync = False
 
-    # 데이터 로드 및 엔진 가동
-    raw_df = load_data()
-    df = engine_predictive_risk(raw_df)
-    df = engine_labor_optimization(df)
-    df = engine_financial_intelligence(df)
+    user_role = handle_auth()
+    st.title("🏗️ 스타쏠라 프로젝트 관리")
 
-    # 사이드바 필터
-    st.sidebar.header("🔍 필터 설정")
-    selected_status = st.sidebar.multiselect("프로젝트 상태", options=df['상태'].unique(), default=df['상태'].unique())
-    filtered_df = df[df['상태'].isin(selected_status)]
+    # Admin Sidebar Tools
+    if user_role == "admin":
+        with st.sidebar.expander("🚀 신규 현장 등록", expanded=False):
+            with st.form("quick_add", clear_on_submit=True):
+                n_name = st.text_input("📍 현장명 *")
+                n_mgr = st.text_input("👤 소장")
+                n_mw = st.number_input("⚡ 용량 (MW)", min_value=0.0, step=0.1)
+                n_loc = st.text_input("🗺️ 위치")
+                if st.form_submit_button("🆕 생성"):
+                    if not n_name: st.error("현장명 필수!")
+                    elif n_name in projects_df['현장'].values: st.error("중복 현장!")
+                    else:
+                        new_p = {col: "" for col in PROJECTS_SCHEMA}
+                        new_p.update({"현장": n_name, "소장": n_mgr, "용량 (MW)": n_mw, "위치": n_loc, "안전 등급": "정상", "공정": "준비 중", "공사 시작일": datetime.now(), "종료일": datetime.now(), "위도": 36.5, "경도": 127.5, "예산 (KRW)": 0, "실제 집행 비용 (KRW)": 0})
+                        new_m = {col: 0 for col in MANAGERS_SCHEMA}
+                        new_m.update({"현장": n_name, "소장": n_mgr})
+                        up_p = pd.concat([projects_df, pd.DataFrame([new_p])], ignore_index=True)
+                        up_m = pd.concat([managers_df, pd.DataFrame([new_m])], ignore_index=True)
+                        if save_data_to_sheet(sheet, up_m, up_p): st.success("생성 완료!"); st.rerun()
 
-    # 탭 생성 (모두 한국어로 변경)
-    tabs = st.tabs([
-        "🏠 대시보드", "💰 재무 현황", "📅 간트 차트", "📍 지도", 
-        "👥 인력 비교", "📈 진행률", "🔮 예측 분석", 
-        "🛠️ 인력 최적화", "💎 재무 지능", "📋 마스터 데이터", "📥 데이터 내보내기"
+        with st.sidebar.expander("🗑️ 현장 삭제", expanded=False):
+            if not projects_df.empty:
+                del_name = st.selectbox("삭제할 현장", projects_df['현장'].tolist())
+                if st.button("🚨 삭제 실행"):
+                    up_p = projects_df[projects_df['현장'] != del_name]
+                    up_m = managers_df[managers_df['현장'] != del_name]
+                    if save_data_to_sheet(sheet, up_m, up_p): st.error(f"{del_name} 삭제됨"); st.rerun()
+
+    # Risk Alert (Existing)
+    if not projects_df.empty:
+        risks = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
+        if risks: st.error(f"⚠️ 위험 현장 발생: {', '.join(risks)}")
+
+    # Tabs
+    tab_dash, tab_finance, tab_gantt, tab_map, tab_man, tab_prog, tab_predict, tab_master, tab_res = st.tabs([
+        "📊 대시보드", "💰 재무", "📅 일정", "🗺️ 지도/날씨", "👷 인력비교", "📈 공정율", "🔮 예측/리스크", "📋 마스터", "📥 내보내기"
     ])
 
-    # --- [탭 0: 대시보드] ---
-    with tabs[0]:
-        st.header("전체 프로젝트 현황 요약")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("총 프로젝트 수", f"{len(filtered_df)} 개")
-        col2.metric("평균 진행률", f"{filtered_df['진행률'].mean()*100:.1f}%")
-        col3.metric("평균 리스크 점수", f"{filtered_df['리스크 점수'].mean():.1f}")
-        col4.metric("총 계약 금액", f"{filtered_df['계약 금액 (KRW)'].sum():,.0f} 원")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.write("### 프로젝트 상태 분포")
-            fig_status = px.pie(filtered_df, names='상태', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-            st.plotly_chart(fig_status, use_container_width=True)
-        with col_b:
-            st.write("### 진행률 vs 리스크 상관관계")
-            fig_scatter = px.scatter(filtered_df, x='진행률', y='리스크 점수', size='계약 금액 (KRW)', color='상태', hover_name='프로젝트명')
-            st.plotly_chart(fig_scatter, use_container_width=True)
+    with tab_dash:
+        if not projects_df.empty:
+            st.subheader("📈 핵심 지표")
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("현장 수", f"{len(projects_df)} 개")
+            k2.metric("총 용량", f"{projects_df['용량 (MW)'].sum():.1f} MW")
+            k3.metric("총 인원", f"{managers_df['총 인원'].sum():.0f} 명")
+            k4.metric("총 예산", f"{projects_df['예산 (KRW)'].sum():,.0f} 원")
+            k5.metric("위험", f"{len(risks)} 개", delta_color="inverse")
+            st.divider()
+            fig_b = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 진행 현황 (%)")
+            st.plotly_chart(fig_b, use_container_width=True)
 
-    # --- [탭 1: 재무 현황] ---
-    with tabs[1]:
-        st.header("재무 현황 분석")
-        fig_finance = px.bar(filtered_df, x='프로젝트명', y=['실행 비용 (KRW)', '계약 금액 (KRW)'], barmode='group')
-        st.plotly_chart(fig_finance, use_container_width=True)
+    with tab_finance:
+        st.subheader("💰 재무 분석")
+        if not projects_df.empty:
+            t_bud = projects_df['예산 (KRW)'].sum()
+            t_act = projects_df['실제 집행 비용 (KRW)'].sum()
+            f1, f2, f3 = st.columns(3)
+            f1.metric("총 예산", f"{t_bud:,.0f} 원")
+            f2.metric("총 집행액", f"{t_act:,.0f} 원", delta=f"{t_act-t_bud:,.0f} 원", delta_color="inverse")
+            f3.metric("평균 집행률", f"{(t_act/t_bud*100 if t_bud>0 else 0):.1f} %")
+            fig_f = go.Figure()
+            fig_f.add_trace(go.Bar(x=projects_df['현장'], y=projects_df['예산 (KRW)'], name='예산', marker_color='#D3D3D3'))
+            fig_f.add_trace(go.Bar(x=projects_df['현장'], y=projects_df['실제 집행 비용 (KRW)'], name='집행', marker_color='#636EFA'))
+            fig_f.update_layout(barmode='group', height=400)
+            st.plotly_chart(fig_f, use_container_width=True)
+            fin_df = projects_df[['현장', '예산 (KRW)', '실제 집행 비용 (KRW)']].copy()
+            fin_df['집행률 (%)'] = (fin_df['실제 집행 비용 (KRW)'] / fin_df['예산 (KRW)'] * 100).fillna(0)
+            def color_rate(v): return 'color: red' if v > 100 else ('color: orange' if v > 80 else 'black')
+            st.dataframe(fin_df.style.format({"예산 (KRW)": "{:,.0f}", "실제 집행 비용 (KRW)": "{:,.0f}", "집행률 (%)": "{:.1f}%"}).map(color_rate, subset=['집행률 (%)']), use_container_width=True)
 
-    # --- [탭 2: 간트 차트] ---
-    with tabs[2]:
-        st.header("프로젝트 타임라인 (Gantt)")
-        fig_gantt = px.timeline(filtered_df, x_start='시작일', x_end='종료일', y='프로젝트명', color='상태')
-        fig_gantt.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig_gantt, use_container_width=True)
+    with tab_gantt:
+        st.subheader("📅 프로젝트 일정")
+        if not projects_df.empty:
+            g_df = projects_df.dropna(subset=['공사 시작일', '종료일'])
+            if not g_df.empty:
+                fig_g = px.timeline(g_df, x_start="공사 시작일", x_end="종료일", y="현장", color="공정", title="공사 기간 및 상태")
+                fig_g.update_yaxes(autorange="reversed")
+                st.plotly_chart(fig_g, use_container_width=True)
 
-    # --- [탭 3: 지도] ---
-    with tabs[3]:
-        st.header("지역별 프로젝트 분포")
-        fig_map = px.scatter_geo(filtered_df, locations="위치", locationmode='country names', size='계약 금액 (KRW)', color='리스크 점수')
-        st.plotly_chart(fig_map, use_container_width=True)
+    with tab_map:
+        col_m, col_w = st.columns([2, 1])
+        with col_m:
+            m_map = folium.Map(location=[36.5, 127.5], zoom_start=7)
+            for _, r in projects_df.iterrows():
+                if pd.notnull(r['위도']) and pd.notnull(r['경도']):
+                    folium.Marker([float(r['위도']), float(r['경도'])], popup=str(r['현장'])).add_to(m_map)
+            st_folium(m_map, width=700, height=450)
+        with col_w:
+            st.subheader("🌦️ 날씨 정보")
+            w_opt = ["전체 요약 보기"] + projects_df['현장'].tolist()
+            sel_w = st.selectbox("🔍 상세 날씨 조회", w_opt)
+            if sel_w == "전체 요약 보기": st.info("현장을 선택하면 해당 지역의 현재 날씨가 표시됩니다.")
+            else:
+                site_info = projects_df[projects_df['현장'] == sel_w].iloc[0]
+                target = site_info['위치'] if site_info['위치'] else "Seoul"
+                weather = fetch_weather_info(target)
+                if weather:
+                    st.metric(f"📍 {sel_w}", f"{weather['temp']}°C")
+                    st.write(f"**상태:** {weather['desc']} | **습도:** {weather['humidity']}%")
+                else: st.warning("날씨 정보를 가져올 수 없습니다.")
+            st.divider()
+            st.markdown("#### 📋 현장별 날씨 요약")
+            if st.button("🔄 전체 현장 날씨 새로고침"):
+                with st.spinner("날씨 데이터를 불러오는 중..."):
+                    summary_list = []
+                    for _, r in projects_df.iterrows():
+                        target = r['위치'] if r['위치'] else "Seoul"
+                        w = fetch_weather_info(target)
+                        summary_list.append({"현장": r['현장'], "위치": target, "온도": f"{w['temp']}°C" if w else "N/A", "상태": w['desc'] if w else "N/A"})
+                    st.session_state.weather_summary = pd.DataFrame(summary_list)
+            if 'weather_summary' in st.session_state and st.session_state.weather_summary is not None:
+                st.dataframe(st.session_state.weather_summary, hide_index=True, use_container_width=True)
+            else: st.info("버튼을 눌러 요약을 불러오세요.")
 
-    # --- [탭 4: 인력 비교] ---
-    with tabs[4]:
-        st.header("인력 투입 현황 비교")
-        fig_labor = go.Figure()
-        fig_labor.add_trace(go.Bar(x=filtered_df['프로젝트명'], y=filtered_df['투입 인력 (명)'], name='현재 투입'))
-        fig_labor.add_trace(go.Bar(x=filtered_df['프로젝트명'], y=filtered_df['목표 인력 (명)'], name='목표 인력'))
-        st.plotly_chart(fig_labor, use_container_width=True)
+    with tab_man:
+        st.subheader("📊 인력 투입 분석")
+        if not managers_df.empty:
+            melted = []
+            for _, r in managers_df.iterrows():
+                s = str(r['현장'])
+                melted.append({'현장': s, '공종': '구조물', '구분': '계획', '인원': r['예정 구조물']})
+                melted.append({'현장': s, '공종': '구조물', '구분': '누적', '인원': r['누적 구조물']})
+                melted.append({'현장': s, '공종': '전기', '구분': '계획', '인원': r['예정 전기']})
+                melted.append({'현장': s, '공종': '전기', '구분': '누적', '인원': r['누적 전기']})
+            df_m = pd.DataFrame(melted)
+            fig_m = go.Figure()
+            for dtype, color, name in [('계획', '#D3D3D3', '계획'), ('누적', '#636EFA', '누적')]:
+                subset = df_m[df_m['구분'] == dtype]
+                fig_m.add_trace(go.Bar(x=subset['현장'], y=subset['인원'], name=name, marker_color=color))
+            fig_m.update_layout(barmode='group', title="현장별 인력 계획 vs 누적")
+            st.plotly_chart(fig_m, use_container_width=True)
+            if user_role == "admin":
+                st.write("📝 인력 데이터 수정")
+                ed_m = st.data_editor(managers_df, use_container_width=True)
+                if st.button("💾 인력 저장"):
+                    if save_data_to_sheet(sheet, ed_m, projects_df): st.success("저장 완료!"); st.rerun()
+            else: st.dataframe(managers_df, use_container_width=True)
 
-    # --- [탭 5: 진행률] ---
-    with tabs[5]:
-        st.header("프로젝트 진행률 현황")
-        fig_prog = px.bar(filtered_df, x='프로젝트명', y='진행률', color='진행률', color_continuous_scale='RdYlGn')
-        st.plotly_chart(fig_prog, use_container_width=True)
+    with tab_prog:
+        st.subheader("📈 공정율 관리")
+        if not projects_df.empty:
+            if user_role == "admin":
+                sel_p = st.selectbox("📍 현장 선택", projects_df['현장'].tolist())
+                if sel_p:
+                    idx = projects_df[projects_df['현장'] == sel_p].index[0]
+                    row = projects_df.loc[idx]
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        new_s = st.slider("구조물 %", 0, 100, int(row['구조물 공정율']))
+                        new_st = st.selectbox("상태", ["준비 중", "공사 중", "일시 중단", "완료"], index=["준비 중", "공사 중", "일시 중단", "완료"].index(row['공정']))
+                    with c2:
+                        new_e = st.slider("전기 %", 0, 100, int(row['전기 공정율']))
+                    if st.button("✅ 업데이트"):
+                        up_p = projects_df.copy()
+                        up_p.at[idx, '구조물 공정율'] = float(new_s)
+                        up_p.at[idx, '전기 공정율'] = float(new_e)
+                        up_p.at[idx, '공정'] = new_st
+                        if save_data_to_sheet(sheet, managers_df, up_p): st.session_state.master_p_df = up_p; st.success("업데이트 완료!"); st.rerun()
+            else: st.dataframe(projects_df, use_container_width=True)
 
-    # --- [탭 6: 예측 분석] ---
-    with tabs[6]:
-        st.header("🔮 AI 리스크 예측 결과")
-        st.write("진행 속도와 리스크 요인을 분석하여 예상 종료일을 산출했습니다.")
-        pred_cols = st.columns(2)
-        with pred_cols[0]:
-            st.dataframe(filtered_df[['프로젝트명', '리스크 점수', '예상 종료일']].sort_values('리스크 점수', ascending=False))
-        with pred_cols[1]:
-            fig_risk = px.histogram(filtered_df, x='리스크 점수', nbins=10, title="리스크 점수 분포")
+    # [Phase 2.1] 신규 탭: 예측 및 리스크 관리
+    with tab_predict:
+        st.subheader("🔮 인공지능 기반 공정 예측 및 리스크 분석")
+        if not projects_df.empty:
+            # 예측 데이터 계산
+            proj_df = analyze_project_projections(projects_df)
+            
+            # 1. 요약 지표
+            avg_delay = proj_df['지연 예상(일)'].mean()
+            high_risk_count = len(proj_df[proj_df['리스크 점수'] >= 50])
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("평균 예상 지연", f"{avg_delay:.1f} 일")
+            m2.metric("고위험 현장", f"{high_risk_count} 개", delta_color="inverse")
+            m3.metric("전체 평균 공정율", f"{(proj_df['구조물 공정율'].mean() + proj_df['전기 공정율'].mean())/2:.1f} %")
+            
+            st.divider()
+            
+            # 2. 리스크 차트
+            st.markdown("#### 📊 현장별 리스크 점수 (0=안전, 100=위험)")
+            fig_risk = px.bar(proj_df, x="현장", y="리스크 점수", color="리스크 점수",
+                             color_continuous_scale="Reds", title="현장별 위험도 지수")
             st.plotly_chart(fig_risk, use_container_width=True)
+            
+            # 3. 상세 예측 테이블
+            st.markdown("#### 📋 프로젝트별 상세 예측 현황")
+            def color_risk(val):
+                if val >= 70: return 'background-color: #ff4b4b; color: white'
+                elif val >= 40: return 'background-color: #ffa500; color: white'
+                else: return ''
 
-    # --- [탭 7: 인력 최적화] ---
-    with tabs[7]:
-        st.header("🛠️ 인력 최적화 제안")
-        st.write("인력 불균형을 감지하여 최적의 재배치 방안을 제시합니다.")
-        st.dataframe(filtered_df[['프로젝트명', '투입 인력 (명)', '목표 인력 (명)', '인력 불균형', '인력 최적화 제안']])
+            def color_delay(val):
+                if val > 0: return 'color: red'
+                else: return 'color: green'
 
-    # --- [탭 8: 재무 지능] ---
-    with tabs[8]:
-        st.header("💎 재무 지능 (Financial Intelligence)")
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            st.write("### 수익률 분석")
-            fig_profit = px.bar(filtered_df, x='프로젝트명', y='수익률 (%)', color='수익률 (%)', color_continuous_scale='Viridis')
-            st.plotly_chart(fig_profit, use_container_width=True)
-        with col_f2:
-            st.write("### 예상 최종 비용 vs 계약 금액")
-            fig_cost = px.scatter(filtered_df, x='계약 금액 (KRW)', y='예상 최종 비용 (KRW)', size='수익금', hover_name='프로젝트명')
-            st.plotly_chart(fig_cost, use_container_width=True)
-        
-        st.dataframe(filtered_df[['프로젝트명', '계약 금액 (KRW)', '실행 비용 (KRW)', '예상 최종 비용 (KRW)', '수익률 (%)']])
+            display_df = proj_df[[
+                '현장', '소장', '공정', '구조물 공정율', '전기 공정율', 
+                '종료일', '예상 종료일', '지연 예상(일)', '리스크 점수'
+            ]].copy()
+            display_df.columns = ['현장', '소장', '상태', '구조물%', '전기%', '계획 종료일', '예상 종료일', '지연(일)', '리스크 점수']
+            
+            st.dataframe(
+                display_df.style.map(color_risk, subset=['리스크 점수']).map(color_delay, subset=['지연(일)'])
+                .format({"계획 종료일": "{:%Y-%m-%d}", "예상 종료일": "{:%Y-%m-%d}", "지연(일)": "{:,.0f}", "리스크 점수": "{:.0f}"}),
+                use_container_width=True
+            )
+            st.info("💡 **리스크 점수 산출 근거:** [공정 지연도] + [안전 등급 위험] + [예산 소진율]을 종합하여 계산되었습니다.")
 
-    # --- [탭 9: 마스터 데이터] ---
-    with tabs[9]:
-        st.header("📋 마스터 데이터 관리")
-        st.write("데이터를 직접 수정하려면 아래 테이블을 편집하세요.")
-        edited_df = st.data_editor(filtered_df, num_rows="dynamic")
+        else: st.info("데이터가 없습니다.")
 
-    # --- [탭 10: 데이터 내보내기] ---
-    with tabs[10]:
-        st.header("📥 데이터 내보내기")
-        csv = filtered_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="CSV 파일로 다운로드",
-            data=csv,
-            file_name='project_intelligence_data.csv',
-            mime='text/csv',
-        )
+    with tab_master:
+        st.subheader("📋 마스터 데이터 편집")
+        st.info("모든 데이터를 직접 수정할 수 있습니다. 수정 후 반드시 '저장' 버튼을 눌러주세요.")
+        mode = st.radio("편집 대상", ["현장/공정 데이터 (Projects)", "인력 데이터 (Managers)"], horizontal=True)
+        if mode == "현장/공정 데이터 (Projects)":
+            ed_p = st.data_editor(projects_df, use_container_width=True, num_rows="dynamic")
+            if st.button("💾 프로젝트 데이터 전체 저장"):
+                if save_data_to_sheet(sheet, managers_df, ed_p): st.session_state.master_p_df = ed_p; st.success("저장 완료!"); st.rerun()
+        else:
+            ed_m = st.data_editor(managers_df, use_container_width=True, num_rows="dynamic")
+            if st.button("💾 인력 데이터 전체 저장"):
+                if save_data_to_sheet(sheet, ed_m, projects_df): st.success("저장 완료!"); st.rerun()
 
-if __name__ == "__main__":
-    main()
+    with tab_res:
+        st.subheader("📥 데이터 관리 및 내보내기")
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            if st.button("📊 프로젝트 데이터 Excel 다운로드"):
+                excel_data = export_to_excel(projects_df)
+                st.download_button("⬇️ 다운로드", excel_data, "projects_export.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col_e2:
+            if st.button("👷 인력 데이터 Excel 다운로드"):
+                excel_data = export_to_excel(managers_df)
+                st.download_button("⬇️ 다운로드", excel_data, "managers_export.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.divider()
+        if user_role == "admin":
+            st.warning("⚠️ 데이터 초기화 주의: '전체 삭제'는 신중하게 결정하십시오.")
+            if st.button("🗑️ 모든 현장 데이터 삭제 (초기화)"):
+                if st.checkbox("위 내용을 확인했습니다. 삭제를 진행합니다."):
+                    empty_p = pd.DataFrame(columns=PROJECTS_SCHEMA)
+                    empty_m = pd.DataFrame(columns=MANAGERS_SCHEMA)
+                    if save_data_to_sheet(sheet, empty_m, empty_p): st.success("모든 데이터가 삭제되었습니다."); st.rerun()
+else:
+    st.error("❌ 구글 시트에 연결할 수 없습니다. `credentials.json` 또는 `st.secrets`를 확인하세요.")
