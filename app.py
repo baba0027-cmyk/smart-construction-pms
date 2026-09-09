@@ -278,8 +278,8 @@ if sheet:
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
     # [Tabs Configuration]
-    tab_dash, tab1, tab2, tab_progress, tab3, tab4 = st.tabs([
-        "📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교", "📈 공정율 관리", "📋 프로젝트 마스터", "👥 인력/자원 관리"
+    tab_dash, tab_gantt, tab1, tab2, tab_progress, tab3, tab4 = st.tabs([
+        "📊 종합 대시보드", "📅 전체 일정 (Gantt)", "🗺️ 지도/날씨", "👷 인력 투입 비교", "📈 공정율 관리", "📋 프로젝트 마스터", "👥 인력/자원 관리"
     ])
 
     # --- [Tab 0] 종합 대시보드 ---
@@ -296,6 +296,53 @@ if sheet:
             st.subheader("📊 현장별 공정 진행 현황 (%)")
             fig_bar = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 구조물 vs 전기 공정율 비교", color_discrete_sequence=["#1f77b4", "#ff7f0e"])
             st.plotly_chart(fig_bar, use_container_width=True)
+
+    # --- [NEW Tab] Gantt Chart ---
+    with tab_gantt:
+        st.subheader("📅 프로젝트 공사 일정 (Gantt Chart)")
+        if not projects_df.empty:
+            # 1. Gantt용 데이터 전처리
+            gantt_df = projects_df[['현장', '공사 시작일', '종료일', '공정']].copy()
+            # 날짜 데이터가 유효한 것만 필터링
+            gantt_df = gantt_df.dropna(subset=['공사 시작일', '종료일'])
+            
+            if not gantt_df.empty:
+                # 2. Gantt 차트 생성
+                fig_gantt = px.timeline(
+                    gantt_df, 
+                    x_start="공사 시작일", 
+                    x_end="종료일", 
+                    y="현장", 
+                    color="공정",
+                    title="현장별 공사 기간 및 공정 상태",
+                    color_discrete_map={
+                        "준비 중": "#D3D3D3", # Grey
+                        "공사 중": "#636EFA", # Blue
+                        "일시 중단": "#EF553B", # Red
+                        "완료": "#00CC96"      # Green
+                    }
+                )
+                
+                # 3. 레이아웃 및 오늘 날짜 수직선 추가
+                fig_gantt.update_yaxes(autorange="reversed") # 최신 현장이 위로 오게
+                fig_gantt.update_layout(
+                    height=max(400, len(gantt_df) * 40), # 현장 수에 따라 높이 자동 조절
+                    xaxis_title="일정",
+                    yaxis_title="현장명"
+                )
+                
+                # 오늘 날짜 수직선 추가
+                today = datetime.now()
+                fig_gantt.add_vline(x=today.strftime("%Y-%m-%d"), line_width=2, line_dash="dash", line_color="red")
+                fig_gantt.add_annotation(x=today.strftime("%Y-%m-%d"), text="오늘", showarrow=False, yref="paper", y=1.05, font_color="red")
+
+                st.plotly_chart(fig_gantt, use_container_width=True)
+                
+                st.info("💡 **빨간색 점선**은 오늘 날짜를 나타냅니다. 현장별 공사 진행 위치를 확인하세요.")
+            else:
+                st.warning("📅 표시할 일정 데이터(시작일/종료일)가 부족합니다.")
+        else:
+            st.write("데이터가 없습니다.")
 
     # --- [Tab 1] 지도 & 날씨 ---
     with tab1:
