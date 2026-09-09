@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # ==========================================
 st.set_page_config(
     layout="wide", 
-    page_title="AI 프로젝트 매니지먼트 인텔리전스",
+    page_title="AI 프로젝트 관리 인텔리전스",
     page_icon="📊"
 )
 
@@ -29,12 +29,12 @@ st.markdown("""
 # 2. 데이터 로딩 및 Mock 데이터 생성 (Fallback)
 # ==========================================
 def generate_mock_data():
-    """모든 지능형 기능을 테스트하기 위한 고도화된 샘플 데이터 생성"""
+    """모든 지능형 기능을 테스트하기 위한 고도화된 한국어 샘플 데이터 생성"""
     np.random.seed(42)
     n_projects = 15
     
     projects = []
-    locations = ['Seoul', 'Busan', 'Incheon', 'Daegu', 'Gwangju', 'Daejeon', 'Ulsan']
+    locations = ['서울', '부산', '인천', '대구', '광주', '대전', '울산']
     
     for i in range(n_projects):
         start_date = datetime(2024, 1, 1) + timedelta(days=np.random.randint(0, 365))
@@ -45,7 +45,7 @@ def generate_mock_data():
         actual_cost = contract_amount * np.random.uniform(0.4, 0.9)
         
         projects.append({
-            '프로젝트명': f'Project {chr(65+i)}',
+            '프로젝트명': f'프로젝트 {chr(65+i)}',
             '시작일': start_date.strftime('%Y-%m-%d'),
             '종료일': end_date.strftime('%Y-%m-%d'),
             '진행률': progress,
@@ -54,7 +54,7 @@ def generate_mock_data():
             '위치': np.random.choice(locations),
             '투입 인력 (명)': np.random.randint(3, 15),
             '목표 인력 (명)': np.random.randint(5, 15),
-            '리스크 요인': np.random.choice(['Low', 'Medium', 'High'], p=[0.5, 0.3, 0.2]),
+            '리스크 요인': np.random.choice(['낮음', '보통', '높음'], p=[0.5, 0.3, 0.2]),
             '상태': np.random.choice(['진행중', '지연', '완료'], p=[0.6, 0.2, 0.2])
         })
     
@@ -67,7 +67,7 @@ def load_data():
         # conn = st.connection("gsheets", type="gsheets")
         # df = conn.read()
         # return df
-        raise Exception("Connection not configured")
+        raise Exception("연결 설정되지 않음")
     except Exception:
         return generate_mock_data()
 
@@ -81,19 +81,16 @@ def engine_predictive_risk(df):
     df['시작일'] = pd.to_datetime(df['시작일'])
     df['종료일'] = pd.to_datetime(df['종료일'])
     
-    # 리스크 점수 계산 로직 (진행률 대비 기간 경과량 + 리스크 요인)
     total_days = (df['종료일'] - df['시작일']).dt.days
     elapsed_days = (pd.Timestamp.now() - df['시작일']).dt.days
     time_progress = elapsed_days / total_days
     
     risk_score = (time_progress - df['진행률']) * 100
-    risk_score = risk_score.clip(lower=0) # 음수는 0으로
+    risk_score = risk_score.clip(lower=0)
     
-    # 리스크 요인 가중치
-    risk_map = {'Low': 0, 'Medium': 15, 'High': 30}
+    risk_map = {'낮음': 0, '보통': 15, '높음': 30}
     df['리스크 점수'] = risk_score + df['리스크 요인'].map(risk_map)
     
-    # 예상 종료일 예측 (지연 정도 반영)
     df['예상 종료일'] = df['종료일'] + pd.to_timedelta(df['리스크 점수'] * 2, unit='D')
     return df
 
@@ -113,11 +110,8 @@ def engine_labor_optimization(df):
 def engine_financial_intelligence(df):
     """Phase 2.3: 재무 지능 - 수익성 및 비용 예측"""
     df = df.copy()
-    # 수익성 (Profitability)
     df['수익금'] = df['계약 금액 (KRW)'] - df['실행 비용 (KRW)']
     df['수익률 (%)'] = (df['수익금'] / df['계약 금액 (KRW)']) * 100
-    
-    # 예상 최종 비용 (Burn Rate 기반 단순 예측)
     df['예상 최종 비용 (KRW)'] = df['실행 비용 (KRW)'] * (1 + (1 - df['진행률']))
     return df
 
@@ -126,7 +120,7 @@ def engine_financial_intelligence(df):
 # ==========================================
 
 def main():
-    st.title("🚀 AI Project Management Intelligence")
+    st.title("🚀 AI 프로젝트 관리 인텔리전스")
     st.subheader("통합 예측 및 재무 분석 대시보드")
 
     # 데이터 로드 및 엔진 가동
@@ -140,21 +134,21 @@ def main():
     selected_status = st.sidebar.multiselect("프로젝트 상태", options=df['상태'].unique(), default=df['상태'].unique())
     filtered_df = df[df['상태'].isin(selected_status)]
 
-    # 탭 생성 (11개 탭)
+    # 탭 생성 (모두 한국어로 변경)
     tabs = st.tabs([
-        "🏠 Dashboard", "💰 Finance", "📅 Gantt", "📍 Map", 
-        "👥 Labor Comp", "📈 Progress", "🔮 Prediction", 
-        "🛠️ Labor Opti", "💎 Fin Intel", "📋 Master", "📥 Export"
+        "🏠 대시보드", "💰 재무 현황", "📅 간트 차트", "📍 지도", 
+        "👥 인력 비교", "📈 진행률", "🔮 예측 분석", 
+        "🛠️ 인력 최적화", "💎 재무 지능", "📋 마스터 데이터", "📥 데이터 내보내기"
     ])
 
-    # --- [TAB 0: Dashboard] ---
+    # --- [탭 0: 대시보드] ---
     with tabs[0]:
         st.header("전체 프로젝트 현황 요약")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("총 프로젝트 수", len(filtered_df))
+        col1.metric("총 프로젝트 수", f"{len(filtered_df)} 개")
         col2.metric("평균 진행률", f"{filtered_df['진행률'].mean()*100:.1f}%")
         col3.metric("평균 리스크 점수", f"{filtered_df['리스크 점수'].mean():.1f}")
-        col4.metric("총 계약 금액", f"{filtered_df['계약 금액 (KRW)'].sum():,.0f} KRW")
+        col4.metric("총 계약 금액", f"{filtered_df['계약 금액 (KRW)'].sum():,.0f} 원")
         
         col_a, col_b = st.columns(2)
         with col_a:
@@ -166,26 +160,26 @@ def main():
             fig_scatter = px.scatter(filtered_df, x='진행률', y='리스크 점수', size='계약 금액 (KRW)', color='상태', hover_name='프로젝트명')
             st.plotly_chart(fig_scatter, use_container_width=True)
 
-    # --- [TAB 1: Finance] ---
+    # --- [탭 1: 재무 현황] ---
     with tabs[1]:
         st.header("재무 현황 분석")
         fig_finance = px.bar(filtered_df, x='프로젝트명', y=['실행 비용 (KRW)', '계약 금액 (KRW)'], barmode='group')
         st.plotly_chart(fig_finance, use_container_width=True)
 
-    # --- [TAB 2: Gantt] ---
+    # --- [탭 2: 간트 차트] ---
     with tabs[2]:
         st.header("프로젝트 타임라인 (Gantt)")
         fig_gantt = px.timeline(filtered_df, x_start='시작일', x_end='종료일', y='프로젝트명', color='상태')
         fig_gantt.update_yaxes(autorange="reversed")
         st.plotly_chart(fig_gantt, use_container_width=True)
 
-    # --- [TAB 3: Map] ---
+    # --- [탭 3: 지도] ---
     with tabs[3]:
         st.header("지역별 프로젝트 분포")
         fig_map = px.scatter_geo(filtered_df, locations="위치", locationmode='country names', size='계약 금액 (KRW)', color='리스크 점수')
         st.plotly_chart(fig_map, use_container_width=True)
 
-    # --- [TAB 4: Labor Comparison] ---
+    # --- [탭 4: 인력 비교] ---
     with tabs[4]:
         st.header("인력 투입 현황 비교")
         fig_labor = go.Figure()
@@ -193,13 +187,13 @@ def main():
         fig_labor.add_trace(go.Bar(x=filtered_df['프로젝트명'], y=filtered_df['목표 인력 (명)'], name='목표 인력'))
         st.plotly_chart(fig_labor, use_container_width=True)
 
-    # --- [TAB 5: Progress] ---
+    # --- [탭 5: 진행률] ---
     with tabs[5]:
         st.header("프로젝트 진행률 현황")
         fig_prog = px.bar(filtered_df, x='프로젝트명', y='진행률', color='진행률', color_continuous_scale='RdYlGn')
         st.plotly_chart(fig_prog, use_container_width=True)
 
-    # --- [TAB 6: Prediction] ---
+    # --- [탭 6: 예측 분석] ---
     with tabs[6]:
         st.header("🔮 AI 리스크 예측 결과")
         st.write("진행 속도와 리스크 요인을 분석하여 예상 종료일을 산출했습니다.")
@@ -210,13 +204,13 @@ def main():
             fig_risk = px.histogram(filtered_df, x='리스크 점수', nbins=10, title="리스크 점수 분포")
             st.plotly_chart(fig_risk, use_container_width=True)
 
-    # --- [TAB 7: Labor Opti] ---
+    # --- [탭 7: 인력 최적화] ---
     with tabs[7]:
         st.header("🛠️ 인력 최적화 제안")
         st.write("인력 불균형을 감지하여 최적의 재배치 방안을 제시합니다.")
         st.dataframe(filtered_df[['프로젝트명', '투입 인력 (명)', '목표 인력 (명)', '인력 불균형', '인력 최적화 제안']])
 
-    # --- [TAB 8: Fin Intel] ---
+    # --- [탭 8: 재무 지능] ---
     with tabs[8]:
         st.header("💎 재무 지능 (Financial Intelligence)")
         col_f1, col_f2 = st.columns(2)
@@ -231,13 +225,13 @@ def main():
         
         st.dataframe(filtered_df[['프로젝트명', '계약 금액 (KRW)', '실행 비용 (KRW)', '예상 최종 비용 (KRW)', '수익률 (%)']])
 
-    # --- [TAB 9: Master] ---
+    # --- [탭 9: 마스터 데이터] ---
     with tabs[9]:
         st.header("📋 마스터 데이터 관리")
         st.write("데이터를 직접 수정하려면 아래 테이블을 편집하세요.")
         edited_df = st.data_editor(filtered_df, num_rows="dynamic")
 
-    # --- [TAB 10: Export] ---
+    # --- [탭 10: 데이터 내보내기] ---
     with tabs[10]:
         st.header("📥 데이터 내보내기")
         csv = filtered_df.to_csv(index=False).encode('utf-8-sig')
