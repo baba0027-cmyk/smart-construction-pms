@@ -10,9 +10,11 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import io
-import requests  # 날씨 호출용
+import requests
+import time
+
 try:
-    from geopy.geocoders import Nominatim # 주소 변환용
+    from geopy.geocoders import Nominatim
     from geopy.extra.rate_limiter import RateLimiter
     HAS_GEOPY = True
 except ImportError:
@@ -21,8 +23,9 @@ except ImportError:
 # --- 0. [Master Schema] ---
 PROJECTS_SCHEMA = ["현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", "위도", "경도"]
 MANAGERS_SCHEMA = ["현장", "소장", "예정 구조물", "예정 전기", "누적 구조물", "누적 전기", "총 인원"]
+LOGS_SCHEMA = ["일시", "역할", "작업", "내용"] # [NEW] 로그 스키마
 
-# --- 1. [Engine] 강력한 계산 및 표준화 엔진 ---
+# --- 1. [Engine] ---
 
 def calculate_managers_totals(df):
     if df.empty: return df
@@ -92,10 +95,8 @@ def standardize_dataframe(df, schema):
     if "총 인원" in new_df.columns: new_df = calculate_managers_totals(new_df)
     return new_df
 
-# --- [UPDATED] Weather Engine with Caching ---
-@st.cache_data(ttl=600) # 10분 동안 날씨 데이터를 캐싱하여 속도 및 API 안정성 확보
+@st.cache_data(ttl=600)
 def fetch_weather_info(location="Seoul"):
-    """wttr.in을 사용하여 실시간 날씨 정보를 가져옵니다."""
     try:
         url = f"https://wttr.in/{location}?format=j1"
         response = requests.get(url, timeout=5)
@@ -106,23 +107,25 @@ def fetch_weather_info(location="Seoul"):
             desc = curr['weatherDesc'][0]['value']
             humidity = curr['humidity']
             return {"temp": temp, "desc": desc, "humidity": humidity}
-        else:
-            return None
     except:
-        return None
+        pass
+    return None
 
-# --- [NEW] Geocoding Engine ---
 def geocode_all_addresses(df):
     if not HAS_GEOPY:
-        return df, "⚠️ geopy 라이브러리가 설치되지 않았습니다. (pip install geopy)"
+        return df, "⚠️ geopy 라이브러리가 설치되지 않았습니다."
     
     new_df = df.copy()
-    geolocator = Nominatim(user_agent="construction_pms_agent")
+    geolocator = Nominatim(user_agent="star_solar_pms_v2")
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
     
     updated_count = 0
     for idx, row in new_df.iterrows():
         addr = row['위치']
+        # [IMPROVEMENT 2] 이미 좌표가 있으면 스킵 (기본값 36.5/127.5 제외)
+        if pd.notnull(row['위도']) and pd.notnull(row['경도']) and row['위도'] != 36.5:
+            continue
+
         if addr and pd.notnull(addr):
             try:
                 location = geocode(addr)
@@ -130,10 +133,11 @@ def geocode_all_addresses(df):
                     new_df.at[idx, '위도'] = location.latitude
                     new_df.at[idx, '경도'] = location.longitude
                     updated_count += 1
+                    time.sleep(0.1) # API 부하 방지
             except:
                 continue
     
-    msg = f"✅ {updated_count}개 현장의 위치를 업데이트했습니다!" if updated_count > 0 else "❌ 변경된 주소를 찾을 수 없습니다."
+    msg = f"✅ {updated_count}개 현장의 위치를 업데이트했습니다!" if updated_count > 0 else "ℹ️ 업데이트할 새로운 주소가 없습니다."
     return new_df, msg
 
 # --- 2. 구글 시트 연결 ---
@@ -155,6 +159,22 @@ def connect_to_gsheets():
         st.error(f"연결 실패: {e}")
         return None
 
+# --- [NEW] Audit Log Function ---
+def log_change(sheet, role, action, details):
+    """[IMPROVEMENT 5] 모든 데이터 변경 사항을 logs 시트에 기록"""
+    try:
+        try:
+            ws_log = sheet.worksheet("logs")
+        except gspread.exceptions.WorksheetNotFound:
+            # logs 시트가 없으면 생성
+            ws_log = sheet.add_worksheet(title="logs", rows="1000", cols=len(LOGS_SCHEMA))
+            ws_log.update("A1", LOGS_SCHEMA)
+        
+        log_entry = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), role, action, details]
+        ws_log.append_row(log_entry)
+    except Exception as e:
+        print(f"Logging failed: {e}")
+
 # --- 3. 데이터 로드 ---
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
@@ -171,20 +191,28 @@ def load_data_from_sheet():
         return pd.DataFrame(columns=MANAGERS_SCHEMA), pd.DataFrame(columns=PROJECTS_SCHEMA)
 
 # --- 4. 데이터 저장 ---
-def save_data_to_sheet(sheet, managers_df, projects_df):
+def save_data_to_sheet(sheet, managers_df, projects_df, user_role, action_type, details=""):
+    """[IMPROVEMENT 1] clear() 없이 범위를 덮어쓰는 방식으로 무결성 강화"""
     try:
         managers_df = calculate_managers_totals(managers_df.copy())
         m_clean = managers_df.astype(object).where(pd.notnull(managers_df), None)
         p_clean = projects_df.astype(object).where(pd.notnull(projects_df), None)
+        
         for col in ['공사 시작일', '종료일']:
             if col in p_clean.columns:
                 p_clean[col] = p_clean[col].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (datetime, pd.Timestamp)) else x)
+        
+        # Managers Update (A1부터 덮어쓰기)
         ws_m = sheet.worksheet("managers")
-        ws_m.clear()
-        ws_m.update([m_clean.columns.tolist()] + m_clean.values.tolist())
+        ws_m.update(f"A1", [m_clean.columns.tolist()] + m_clean.values.tolist())
+        
+        # Projects Update (A1부터 덮어쓰기)
         ws_p = sheet.worksheet("projects")
-        ws_p.clear()
-        ws_p.update([p_clean.columns.tolist()] + p_clean.values.tolist())
+        ws_p.update(f"A1", [p_clean.columns.tolist()] + p_clean.values.tolist())
+        
+        # [NEW] 로그 기록
+        log_change(sheet, user_role, action_type, details)
+        
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -198,7 +226,13 @@ def handle_auth():
     user_role = "viewer"
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password", key="admin_pw_input")
-        admin_pw = st.secrets.get("ADMIN_PW", "1931")
+        # [IMPROVEMENT 3] Fallback(기본값) 제거로 보안 강화
+        try:
+            admin_pw = st.secrets["ADMIN_PW"]
+        except KeyError:
+            st.error("❌ 시스템 설정 오류: 관리자 비밀번호가 설정되지 않았습니다.")
+            st.stop()
+            
         if password == admin_pw:
             user_role = "admin"
             st.sidebar.success("✅ 관리자 모드 활성화")
@@ -214,22 +248,20 @@ def export_to_excel(df):
     return output.getvalue()
 
 # --- 7. 메인 앱 ---
-st.set_page_config(page_title="스타쏠라 프로젝트 관리", layout="wide") # [CHANGED] Name updated
+st.set_page_config(page_title="스타쏠라 프로젝트 관리", layout="wide")
 
 sheet = connect_to_gsheets()
 if sheet:
-    # Session State management for Project Master to allow Geocoding flow
     if 'master_p_df' not in st.session_state:
         _, projects_df = load_data_from_sheet()
         st.session_state.master_p_df = projects_df
 
     managers_df, projects_df = load_data_from_sheet()
-    # Sync session state with loaded data if it's the first load
     if 'master_p_df' in st.session_state and st.session_state.master_p_df.empty:
         st.session_state.master_p_df = projects_df
 
     user_role = handle_auth()
-    st.title("🏗️ 스타쏠라 프로젝트 관리") # [CHANGED] Name updated
+    st.title("🏗️ 스타쏠라 프로젝트 관리 (v2.0)")
 
     # --- [Sidebar] 관리자 전용 기능 ---
     if user_role == "admin":
@@ -251,7 +283,7 @@ if sheet:
                         updated_p = pd.concat([projects_df, pd.DataFrame([new_p_data])], ignore_index=True)
                         updated_m = pd.concat([managers_df, pd.DataFrame([new_m_data])], ignore_index=True)
                         updated_m = calculate_managers_totals(updated_m)
-                        if save_data_to_sheet(sheet, updated_m, updated_p): 
+                        if save_data_to_sheet(sheet, updated_m, updated_p, user_role, "현장 신규 등록", f"현장명: {new_site_name}"): 
                             st.success(f"✅ '{new_site_name}' 생성 완료!"); 
                             st.session_state.master_p_df = updated_p
                             st.rerun()
@@ -265,7 +297,7 @@ if sheet:
                     if confirm_delete:
                         updated_p = projects_df[projects_df['현장'] != site_to_delete]
                         updated_m = managers_df[managers_df['현장'] != site_to_delete]
-                        if save_data_to_sheet(sheet, updated_m, updated_p): 
+                        if save_data_to_sheet(sheet, updated_m, updated_p, user_role, "현장 삭제", f"삭제된 현장: {site_to_delete}"): 
                             st.error(f"✅ '{site_to_delete}' 현장이 삭제되었습니다!"); 
                             st.session_state.master_p_df = updated_p
                             st.rerun()
@@ -278,8 +310,8 @@ if sheet:
         if high_risk: st.error(f"⚠️ **긴급 알림**: 위험 현장 [{', '.join(high_risk)}] 관리가 필요합니다!")
 
     # [Tabs Configuration]
-    tab_dash, tab1, tab2, tab_progress, tab3, tab4 = st.tabs([
-        "📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교", "📈 공정율 관리", "📋 프로젝트 마스터", "👥 인력/자원 관리"
+    tab_dash, tab1, tab2, tab_progress, tab3, tab4, tab_log = st.tabs([
+        "📊 종합 대시보드", "🗺️ 지도/날씨", "👷 인력 투입 비교", "📈 공정율 관리", "📋 프로젝트 마스터", "👥 인력/자원 관리", "📜 수정 이력"
     ])
 
     # --- [Tab 0] 종합 대시보드 ---
@@ -392,7 +424,7 @@ if sheet:
                 }
                 edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab2")
                 if st.button("💾 변경사항 저장", key="btn_save_tab2"):
-                    if save_data_to_sheet(sheet, edited_m, projects_df): st.success("✅ 저장 완료! (총 인원이 자동 합산되었습니다)"); st.rerun()
+                    if save_data_to_sheet(sheet, edited_m, projects_df, user_role, "인력 데이터 수정", "인력 수량 변경"): st.success("✅ 저장 완료!"); st.rerun()
             else:
                 st.dataframe(managers_df, use_container_width=True)
 
@@ -415,7 +447,7 @@ if sheet:
             col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
             with col_btn1:
                 if st.button("📍 위경도 자동 변환", key="btn_geocode"):
-                    with st.spinner("주소를 검색하고 있습니다... (약 1~2초 소요)"):
+                    with st.spinner("주소를 검색하고 있습니다..."):
                         updated_p, msg = geocode_all_addresses(edited_p)
                         st.session_state.master_p_df = updated_p
                         st.success(msg)
@@ -423,7 +455,7 @@ if sheet:
             
             with col_btn2:
                 if st.button("💾 마스터 저장", key="btn_save_tab3"):
-                    if save_data_to_sheet(sheet, managers_df, edited_p): 
+                    if save_data_to_sheet(sheet, managers_df, edited_p, user_role, "마스터 정보 수정", "기초 데이터 변경"): 
                         st.session_state.master_p_df = edited_p
                         st.success("✅ 저장 완료!"); 
                         st.rerun()
@@ -439,7 +471,7 @@ if sheet:
         
         if user_role == "admin":
             st.markdown("### ⚡ 1. 초고속 슬라이더 업데이트 (추천)")
-            st.info("💡 현장 하나를 선택하고 슬라이더를 밀어서 바로 저장하세요. 타이핑할 필요가 없습니다!")
+            st.info("💡 현장 하나를 선택하고 슬라이더를 밀어서 바로 저장하세요.")
             
             selected_site = st.selectbox("📍 업데이트할 현장을 선택하세요", projects_df['현장'].tolist(), key="slider_site_sel")
             
@@ -459,8 +491,7 @@ if sheet:
                     updated_p.at[site_idx, '구조물 공정율'] = float(new_struct_prog)
                     updated_p.at[site_idx, '전기 공정율'] = float(new_elec_prog)
                     updated_p.at[site_idx, '공정'] = new_status
-                    if save_data_to_sheet(sheet, managers_df, updated_p):
-                        # [FIXED] Sync session state for Master tab
+                    if save_data_to_sheet(sheet, managers_df, updated_p, user_role, "공정율 슬라이더 업데이트", f"현장: {selected_site}"):
                         st.session_state.master_p_df = updated_p
                         st.success(f"✅ '{selected_site}' 업데이트 완료!"); st.rerun()
 
@@ -482,8 +513,7 @@ if sheet:
                 key="editor_tab_progress"
             )
             if st.button("💾 일괄 변경사항 저장", key="btn_save_prog"):
-                if save_data_to_sheet(sheet, managers_df, edited_prog):
-                    # [FIXED] Sync session state for Master tab
+                if save_data_to_sheet(sheet, managers_df, edited_prog, user_role, "공정율 일괄 업데이트", "다수 현장 수정"):
                     st.session_state.master_p_df = edited_prog
                     st.success("✅ 일괄 업데이트 완료!"); st.rerun()
         else:
@@ -502,10 +532,26 @@ if sheet:
             }
             edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
             if st.button("💾 저장", key="btn_save_tab4"):
-                if save_data_to_sheet(sheet, edited_m, projects_df): 
-                    st.success("✅ 저장 완료! (총 인원이 자동 합산되었습니다)"); st.rerun()
+                if save_data_to_sheet(sheet, edited_m, projects_df, user_role, "인력 데이터 일괄 수정", "전체 인력 관리"): 
+                    st.success("✅ 저장 완료!"); st.rerun()
         else:
             st.dataframe(managers_df, use_container_width=True)
+
+    # --- [NEW] Tab 5: Audit Log ---
+    with tab_log:
+        st.subheader("📜 데이터 수정 이력 (Audit Log)")
+        st.info("💡 모든 관리자 작업 기록은 자동으로 로그 시트에 저장됩니다.")
+        try:
+            log_sheet = sheet.worksheet("logs")
+            log_data = log_sheet.get_all_records()
+            if log_data:
+                log_df = pd.DataFrame(log_data)
+                # 최신 로그가 위로 오도록 역순 정렬
+                st.dataframe(log_df.iloc[::-1], use_container_width=True)
+            else:
+                st.write("기록된 변경 사항이 없습니다.")
+        except:
+            st.write("로그 기록이 아직 생성되지 않았습니다. 첫 번째 관리자 작업을 수행하면 생성됩니다.")
 
 else:
     st.error("구글 시트 연결 실패")
