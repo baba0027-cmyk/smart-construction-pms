@@ -122,7 +122,7 @@ def geocode_all_addresses(df):
     updated_count = 0
     for idx, row in new_df.iterrows():
         addr = row['위치']
-        # [IMPROVEMENT 2] 이미 좌표가 있으면 스킵 (기본값 36.5/127.5 제외)
+        # [IMPROVEMENT 2] 좌표가 이미 있으면 스킵 (기본값 제외)
         if pd.notnull(row['위도']) and pd.notnull(row['경도']) and row['위도'] != 36.5:
             continue
 
@@ -133,7 +133,7 @@ def geocode_all_addresses(df):
                     new_df.at[idx, '위도'] = location.latitude
                     new_df.at[idx, '경도'] = location.longitude
                     updated_count += 1
-                    time.sleep(0.1) # API 부하 방지
+                    time.sleep(0.1)
             except:
                 continue
     
@@ -166,7 +166,6 @@ def log_change(sheet, role, action, details):
         try:
             ws_log = sheet.worksheet("logs")
         except gspread.exceptions.WorksheetNotFound:
-            # logs 시트가 없으면 생성
             ws_log = sheet.add_worksheet(title="logs", rows="1000", cols=len(LOGS_SCHEMA))
             ws_log.update("A1", LOGS_SCHEMA)
         
@@ -202,11 +201,11 @@ def save_data_to_sheet(sheet, managers_df, projects_df, user_role, action_type, 
             if col in p_clean.columns:
                 p_clean[col] = p_clean[col].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (datetime, pd.Timestamp)) else x)
         
-        # Managers Update (A1부터 덮어쓰기)
+        # Managers Update (A1부터 바로 덮어쓰기 - Atomic-like)
         ws_m = sheet.worksheet("managers")
         ws_m.update(f"A1", [m_clean.columns.tolist()] + m_clean.values.tolist())
         
-        # Projects Update (A1부터 덮어쓰기)
+        # Projects Update (A1부터 바로 덮어쓰기)
         ws_p = sheet.worksheet("projects")
         ws_p.update(f"A1", [p_clean.columns.tolist()] + p_clean.values.tolist())
         
@@ -226,7 +225,7 @@ def handle_auth():
     user_role = "viewer"
     if auth_mode == "관리자 (수정/관리용)":
         password = st.sidebar.text_input("관리자 비밀번호", type="password", key="admin_pw_input")
-        # [IMPROVEMENT 3] Fallback(기본값) 제거로 보안 강화
+        # [IMPROVEMENT 3] Fallback 제거로 보안 강화
         try:
             admin_pw = st.secrets["ADMIN_PW"]
         except KeyError:
@@ -431,127 +430,4 @@ if sheet:
     # --- [Tab 3] 프로젝트 마스터 (기초 정보 수정용) ---
     with tab3:
         st.subheader("📋 프로젝트 마스터 정보")
-        st.info("💡 현장 위치, 용량, 안전 등급 등 프로젝트의 기초 정보를 수정합니다.")
-        
-        if user_role == "admin":
-            col_config = {
-                "구조물 공정율": st.column_config.ProgressColumn("구조물 %", min_value=0, max_value=100, format="%d%%"),
-                "전기 공정율": st.column_config.ProgressColumn("전기 %", min_value=0, max_value=100, format="%d%%"),
-                "용량 (MW)": st.column_config.NumberColumn("용량 (MW)", format="%.2f"),
-                "안전 등급": st.column_config.SelectboxColumn("안전", options=["정상", "주의", "위험"]),
-                "공정": st.column_config.SelectboxColumn("공정", options=["준비 중", "공사 중", "일시 중단", "완료"])
-            }
-            
-            edited_p = st.data_editor(st.session_state.master_p_df, column_config=col_config, use_container_width=True, key="editor_tab3")
-            
-            col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-            with col_btn1:
-                if st.button("📍 위경도 자동 변환", key="btn_geocode"):
-                    with st.spinner("주소를 검색하고 있습니다..."):
-                        updated_p, msg = geocode_all_addresses(edited_p)
-                        st.session_state.master_p_df = updated_p
-                        st.success(msg)
-                        st.rerun()
-            
-            with col_btn2:
-                if st.button("💾 마스터 저장", key="btn_save_tab3"):
-                    if save_data_to_sheet(sheet, managers_df, edited_p, user_role, "마스터 정보 수정", "기초 데이터 변경"): 
-                        st.session_state.master_p_df = edited_p
-                        st.success("✅ 저장 완료!"); 
-                        st.rerun()
-            
-            with col_btn3:
-                st.download_button("📥 엑셀 다운로드", export_to_excel(edited_p), "projects.xlsx", key="btn_dl_excel")
-        else:
-            st.dataframe(projects_df.drop(columns=['위도', '경도'], errors='ignore'), use_container_width=True)
-
-    # --- [Tab 4] 공정율 관리 (Quick Update) ---
-    with tab_progress:
-        st.subheader("📈 공정율 관리")
-        
-        if user_role == "admin":
-            st.markdown("### ⚡ 1. 초고속 슬라이더 업데이트 (추천)")
-            st.info("💡 현장 하나를 선택하고 슬라이더를 밀어서 바로 저장하세요.")
-            
-            selected_site = st.selectbox("📍 업데이트할 현장을 선택하세요", projects_df['현장'].tolist(), key="slider_site_sel")
-            
-            if selected_site:
-                site_idx = projects_df[projects_df['현장'] == selected_site].index[0]
-                current_row = projects_df.loc[site_idx]
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    new_struct_prog = st.slider("🏗️ 구조물 공정율 (%)", 0, 100, int(current_row['구조물 공정율']))
-                    new_status = st.selectbox("🔄 현재 공정 상태", ["준비 중", "공사 중", "일시 중단", "완료"], index=["준비 중", "공사 중", "일시 중단", "완료"].index(current_row['공정']))
-                with col2:
-                    new_elec_prog = st.slider("⚡ 전기 공정율 (%)", 0, 100, int(current_row['전기 공정율']))
-                
-                if st.button(f"✅ '{selected_site}' 정보 업데이트", key="btn_update_slider"):
-                    updated_p = projects_df.copy()
-                    updated_p.at[site_idx, '구조물 공정율'] = float(new_struct_prog)
-                    updated_p.at[site_idx, '전기 공정율'] = float(new_elec_prog)
-                    updated_p.at[site_idx, '공정'] = new_status
-                    if save_data_to_sheet(sheet, managers_df, updated_p, user_role, "공정율 슬라이더 업데이트", f"현장: {selected_site}"):
-                        st.session_state.master_p_df = updated_p
-                        st.success(f"✅ '{selected_site}' 업데이트 완료!"); st.rerun()
-
-            st.divider()
-            
-            st.markdown("### 📋 2. 일괄 편집 모드 (Batch Edit)")
-            st.info("💡 여러 현장의 데이터를 한꺼번에 수정할 때 사용하세요.")
-            progress_cols = ["현장", "공정", "구조물 공정율", "전기 공정율"]
-            col_config_prog = {
-                "구조물 공정율": st.column_config.ProgressColumn("🏗️ 구조물 %", min_value=0, max_value=100, format="%d%%"),
-                "전기 공정율": st.column_config.ProgressColumn("⚡ 전기 %", min_value=0, max_value=100, format="%d%%"),
-                "공정": st.column_config.SelectboxColumn("진행상태", options=["준비 중", "공사 중", "일시 중단", "완료"])
-            }
-            edited_prog = st.data_editor(
-                projects_df, 
-                column_config=col_config_prog, 
-                column_order=progress_cols,
-                use_container_width=True, 
-                key="editor_tab_progress"
-            )
-            if st.button("💾 일괄 변경사항 저장", key="btn_save_prog"):
-                if save_data_to_sheet(sheet, managers_df, edited_prog, user_role, "공정율 일괄 업데이트", "다수 현장 수정"):
-                    st.session_state.master_p_df = edited_prog
-                    st.success("✅ 일괄 업데이트 완료!"); st.rerun()
-        else:
-            st.dataframe(projects_df[["현장", "공정", "구조물 공정율", "전기 공정율"]], use_container_width=True)
-
-    with tab4:
-        st.subheader("👥 전체 인력/자원 관리")
-        if user_role == "admin":
-            st.info("💡 [현장별 인력 투입 관리 모드] *입력 후 반드시 [저장] 버튼을 눌러주세요.*")
-            col_config = {
-                "예정 구조물": st.column_config.NumberColumn("🏗️ 예정(구조)", format="%d"),
-                "예정 전기": st.column_config.NumberColumn("⚡ 예정(전기)", format="%d"),
-                "누적 구조물": st.column_config.NumberColumn("🏗️ 누적(구조)", format="%d"),
-                "누적 전기": st.column_config.NumberColumn("⚡ 누적(전기)", format="%d"),
-                "총 인원": st.column_config.NumberColumn("📊 총 인원", format="%d", disabled=True)
-            }
-            edited_m = st.data_editor(managers_df, column_config=col_config, use_container_width=True, key="editor_tab4_site")
-            if st.button("💾 저장", key="btn_save_tab4"):
-                if save_data_to_sheet(sheet, edited_m, projects_df, user_role, "인력 데이터 일괄 수정", "전체 인력 관리"): 
-                    st.success("✅ 저장 완료!"); st.rerun()
-        else:
-            st.dataframe(managers_df, use_container_width=True)
-
-    # --- [NEW] Tab 5: Audit Log ---
-    with tab_log:
-        st.subheader("📜 데이터 수정 이력 (Audit Log)")
-        st.info("💡 모든 관리자 작업 기록은 자동으로 로그 시트에 저장됩니다.")
-        try:
-            log_sheet = sheet.worksheet("logs")
-            log_data = log_sheet.get_all_records()
-            if log_data:
-                log_df = pd.DataFrame(log_data)
-                # 최신 로그가 위로 오도록 역순 정렬
-                st.dataframe(log_df.iloc[::-1], use_container_width=True)
-            else:
-                st.write("기록된 변경 사항이 없습니다.")
-        except:
-            st.write("로그 기록이 아직 생성되지 않았습니다. 첫 번째 관리자 작업을 수행하면 생성됩니다.")
-
-else:
-    st.error("구글 시트 연결 실패")
+        st.info("💡 현장 위치, 용량, 안전 등
