@@ -19,7 +19,7 @@ try:
 except ImportError:
     HAS_GEOPY = False
 
-# --- 0. [Constants & Schema] ---
+# --- 0. [Constants & Schema] --- (제공해주신 스키마 그대로 유지)
 PROJECTS_SCHEMA = [
     "현장", "소장", "용량 (MW)", "위치", "안전 등급", "공정", 
     "구조물 공정율", "전기 공정율", "공사 시작일", "종료일", 
@@ -52,7 +52,7 @@ COLUMN_MAPPING = {
 NUMERIC_COLS = ["용량 (MW)", "구조물 공정율", "전기 공정율", "예정 구조물", "예정 전기", 
                 "누적 구조물", "누적 전기", "총 인원", "예산 (KRW)", "실제 집행 비용 (KRW)"]
 
-# --- 1. [Engine] 데이터 및 예측 엔진 ---
+# --- 1. [Engine] 데이터 및 지능형 분석 엔진 ---
 
 def calculate_managers_totals(df):
     if df.empty: return df
@@ -107,7 +107,7 @@ def fetch_weather_info(location="Seoul"):
     except: pass
     return None
 
-# [Phase 2.1 핵심] 예측 엔진: 공정 속도 기반 종료일 계산 및 리스크 산출
+# [Phase 2.1] 예측 엔진: 공정 속도 기반 종료일 계산 및 리스크 산출
 def analyze_project_projections(df):
     if df.empty: return df
     proj_df = df.copy()
@@ -117,36 +117,29 @@ def analyze_project_projections(df):
     for _, row in proj_df.iterrows():
         start_date = row['공사 시작일']
         end_date_plan = row['종료일']
-        # 평균 공정율 (구조물과 전기의 평균)
         avg_prog = (row['구조물 공정율'] + row['전기 공정율']) / 2
         
-        # 경과 일수 계산 (최소 1일로 설정하여 0 나누기 방지)
         days_passed = (today - start_date).days
         if days_passed <= 0: days_passed = 1
         
-        # 하루 평균 공정 진행률 (%)
         daily_speed = avg_prog / days_passed
-        
-        # 남은 공정 수행에 필요한 일수 계산
         remaining_prog = 100 - avg_prog
+        
         if daily_speed > 0:
             days_to_finish = remaining_prog / daily_speed
         else:
-            days_to_finish = 365 # 속도가 0이면 1년 지연으로 간주 (Stalled)
+            days_to_finish = 365 
 
         est_end_date = today + timedelta(days=int(days_to_finish))
         delay_days = (est_end_date - end_date_plan).days
         
-        # 리스크 점수 계산 (0 ~ 100)
-        # 1. 지연 리스크 (지연일수에 비례)
-        delay_risk = min(max(delay_days * 2, 0), 50) 
-        # 2. 안전 리스크
-        safety_risk = 50 if row['안전 등급'] == '위험' else 0
-        # 3. 재무 리스크 (예산 초과 시)
+        # 리스크 점수 고도화
+        delay_risk = min(max(delay_days * 2, 0), 40) 
+        safety_risk = 30 if row['안전 등급'] == '위험' else 0
         budget_risk = 0
         if row['예산 (KRW)'] > 0:
             usage_rate = row['실제 집행 비용 (KRW)'] / row['예산 (KRW)']
-            if usage_rate > 0.9: budget_risk = min((usage_rate - 0.9) * 200, 50)
+            if usage_rate > 0.9: budget_risk = min((usage_rate - 0.9) * 200, 30)
             
         risk_score = delay_risk + safety_risk + budget_risk
         
@@ -160,7 +153,39 @@ def analyze_project_projections(df):
     proj_results = pd.DataFrame(projections, index=df.index)
     return pd.concat([proj_df, proj_results], axis=1)
 
-# --- 2. Google Sheets Connection ---
+# [Phase 2.2] 인력 최적화 엔진: 계획 대비 실적 비교
+def analyze_labor_optimization(managers_df):
+    if managers_df.empty: return managers_df
+    opt_df = managers_df.copy()
+    
+    def get_suggestion(row):
+        # 구조물/전기 통합 인력 비교
+        planned = row['예정 구조물'] + row['예정 전기']
+        actual = row['누적 구조물'] + row['누적 전기']
+        diff = actual - planned
+        
+        if diff < -2: return "⚠️ 인력 부족 (충원 필요)"
+        elif diff > 2: return "💡 인력 과다 (재배치 검토)"
+        else: return "✅ 적정 인력"
+    
+    opt_df['인력 최적화 제안'] = opt_df.apply(get_suggestion, axis=1)
+    opt_df['인력 차이'] = opt_df['누적 구조물'] + opt_df['누적 전기'] - (opt_df['예정 구조물'] + opt_df['예정 전기'])
+    return opt_df
+
+# [Phase 2.3] 재무 지능 엔진: 수익성 및 예산 관리
+def analyze_financial_intelligence(projects_df):
+    if projects_df.empty: return projects_df
+    fin_df = projects_df.copy()
+    
+    # 예산 대비 집행률 및 수익성(예상)
+    fin_df['예산 소진율 (%)'] = (fin_df['실제 집행 비용 (KRW)'] / fin_df['예산 (KRW)'] * 100).fillna(0)
+    # 진행률 대비 비용 지출의 적절성 (Burn Rate 개념)
+    avg_prog = (fin_df['구조물 공정율'] + fin_df['전기 공정율']) / 2
+    fin_df['비용 효율성'] = (avg_prog / fin_df['예산 소진율 (%)'] * 100).fillna(0)
+    
+    return fin_df
+
+# --- 2. Google Sheets Connection --- (제공해주신 로직 유지)
 @st.cache_resource
 def connect_to_gsheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -178,7 +203,7 @@ def connect_to_gsheets():
         st.error(f"연결 실패: {e}")
         return None
 
-# --- 3. Data Loading ---
+# --- 3. Data Loading --- (제공해주신 로직 유지)
 @st.cache_data(ttl=300)
 def load_data_from_sheet():
     sheet = connect_to_gsheets()
@@ -211,7 +236,7 @@ def save_data_to_sheet(sheet, managers_df, projects_df):
         st.error(f"저장 실패: {e}")
         return False
 
-# --- 4. Auth & Utils ---
+# --- 4. Auth & Utils --- (제공해주신 로직 유지)
 def handle_auth():
     st.sidebar.title("🔐 접속 권한")
     auth_mode = st.sidebar.radio("접속 모드", ["조회자 (읽기 전용)", "관리자 (수정/관리용)"], key="auth_radio")
@@ -236,14 +261,23 @@ st.set_page_config(page_title="스타쏠라 프로젝트 관리", layout="wide")
 sheet = connect_to_gsheets()
 if sheet:
     managers_df, projects_df = load_data_from_sheet()
+    
+    # 데이터 엔진 가동
+    # 1. 예측 엔진 실행
+    projects_with_pred = analyze_project_projections(projects_df)
+    # 2. 인력 최적화 엔진 실행
+    managers_with_opt = analyze_labor_optimization(managers_df)
+    # 3. 재무 지능 엔진 실행
+    projects_with_fin = analyze_financial_intelligence(projects_with_pred)
+
     if 'master_p_df' not in st.session_state or st.session_state.get('needs_sync', False):
         st.session_state.master_p_df = projects_df
         st.session_state.needs_sync = False
 
     user_role = handle_auth()
-    st.title("🏗️ 스타쏠라 프로젝트 관리")
+    st.title("🏗️ 스타쏠라 프로젝트 관리 (AI Intelligence)")
 
-    # Admin Sidebar Tools
+    # Admin Sidebar Tools (제공해주신 로직 유지)
     if user_role == "admin":
         with st.sidebar.expander("🚀 신규 현장 등록", expanded=False):
             with st.form("quick_add", clear_on_submit=True):
@@ -271,50 +305,73 @@ if sheet:
                     up_m = managers_df[managers_df['현장'] != del_name]
                     if save_data_to_sheet(sheet, up_m, up_p): st.error(f"{del_name} 삭제됨"); st.rerun()
 
-    # Risk Alert (Existing)
+    # Risk Alert (제공해주신 로직 유지)
     if not projects_df.empty:
         risks = projects_df[projects_df['안전 등급'].astype(str) == '위험']['현장'].tolist()
         if risks: st.error(f"⚠️ 위험 현장 발생: {', '.join(risks)}")
 
     # Tabs
     tab_dash, tab_finance, tab_gantt, tab_map, tab_man, tab_prog, tab_predict, tab_master, tab_res = st.tabs([
-        "📊 대시보드", "💰 재무", "📅 일정", "🗺️ 지도/날씨", "👷 인력비교", "📈 공정율", "🔮 예측/리스크", "📋 마스터", "📥 내보내기"
+        "📊 대시보드", "💰 재무 지능", "📅 일정", "🗺️ 지도/날씨", "👷 인력 최적화", "📈 공정율", "🔮 예측/리스크", "📋 마스터", "📥 내보내기"
     ])
 
+    # --- [TAB 0: 대시보드] ---
     with tab_dash:
         if not projects_df.empty:
-            st.subheader("📈 핵심 지표")
+            st.subheader("📈 핵심 지표 요약")
             k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("현장 수", f"{len(projects_df)} 개")
             k2.metric("총 용량", f"{projects_df['용량 (MW)'].sum():.1f} MW")
-            k3.metric("총 인원", f"{managers_df['총 인원'].sum():.0f} 명")
+            k3.metric("평균 공정율", f"{(projects_df['구조물 공정율'].mean() + projects_df['전기 공정율'].mean())/2:.1f}%")
             k4.metric("총 예산", f"{projects_df['예산 (KRW)'].sum():,.0f} 원")
-            k5.metric("위험", f"{len(risks)} 개", delta_color="inverse")
+            k5.metric("위험 현장", f"{len(risks)} 개", delta_color="inverse")
+            
             st.divider()
-            fig_b = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group", title="현장별 공정 진행 현황 (%)")
-            st.plotly_chart(fig_b, use_container_width=True)
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write("### 현장별 공정 진행 현황 (%)")
+                fig_b = px.bar(projects_df, x="현장", y=["구조물 공정율", "전기 공정율"], barmode="group")
+                st.plotly_chart(fig_b, use_container_width=True)
+            with col_b:
+                st.write("### 리스크 점수 분포")
+                fig_risk_dist = px.histogram(projects_with_pred, x="리스크 점수", nbins=10, color_discrete_sequence=['#EF553B'])
+                st.plotly_chart(fig_risk_dist, use_container_width=True)
 
+    # --- [TAB 1: 재무 지능] ---
     with tab_finance:
-        st.subheader("💰 재무 분석")
+        st.subheader("💎 재무 지능 (Financial Intelligence)")
         if not projects_df.empty:
             t_bud = projects_df['예산 (KRW)'].sum()
             t_act = projects_df['실제 집행 비용 (KRW)'].sum()
+            
             f1, f2, f3 = st.columns(3)
             f1.metric("총 예산", f"{t_bud:,.0f} 원")
             f2.metric("총 집행액", f"{t_act:,.0f} 원", delta=f"{t_act-t_bud:,.0f} 원", delta_color="inverse")
-            f3.metric("평균 집행률", f"{(t_act/t_bud*100 if t_bud>0 else 0):.1f} %")
-            fig_f = go.Figure()
-            fig_f.add_trace(go.Bar(x=projects_df['현장'], y=projects_df['예산 (KRW)'], name='예산', marker_color='#D3D3D3'))
-            fig_f.add_trace(go.Bar(x=projects_df['현장'], y=projects_df['실제 집행 비용 (KRW)'], name='집행', marker_color='#636EFA'))
-            fig_f.update_layout(barmode='group', height=400)
-            st.plotly_chart(fig_f, use_container_width=True)
-            fin_df = projects_df[['현장', '예산 (KRW)', '실제 집행 비용 (KRW)']].copy()
-            fin_df['집행률 (%)'] = (fin_df['실제 집행 비용 (KRW)'] / fin_df['예산 (KRW)'] * 100).fillna(0)
-            def color_rate(v): return 'color: red' if v > 100 else ('color: orange' if v > 80 else 'black')
-            st.dataframe(fin_df.style.format({"예산 (KRW)": "{:,.0f}", "실제 집행 비용 (KRW)": "{:,.0f}", "집행률 (%)": "{:.1f}%"}).map(color_rate, subset=['집행률 (%)']), use_container_width=True)
+            f3.metric("평균 예산 소진율", f"{(t_act/t_bud*100 if t_bud>0 else 0):.1f} %")
+            
+            st.divider()
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                st.write("### 예산 vs 실제 집행 비교")
+                fig_f = go.Figure()
+                fig_f.add_trace(go.Bar(x=projects_df['현장'], y=projects_df['예산 (KRW)'], name='예산', marker_color='#D3D3D3'))
+                fig_f.add_trace(go.Bar(x=projects_df['현장'], y=projects_df['실제 집행 비용 (KRW)'], name='집행', marker_color='#636EFA'))
+                fig_f.update_layout(barmode='group', height=400)
+                st.plotly_chart(fig_f, use_container_width=True)
+            with col_f2:
+                st.write("### 예산 소진율 vs 공정 진행율")
+                # 공정율과 소진율의 상관관계 시각화
+                projects_with_fin['평균공정'] = (projects_with_fin['구조물 공정율'] + projects_with_fin['전기 공정율']) / 2
+                fig_sc = px.scatter(projects_with_fin, x='평균공정', y='예산 소진율 (%)', size='용량 (MW)', color='현장', hover_name='현장')
+                st.plotly_chart(fig_sc, use_container_width=True)
 
+            st.write("### 💰 상세 재무 데이터")
+            fin_display = projects_with_fin[['현장', '예산 (KRW)', '실제 집행 비용 (KRW)', '예산 소진율 (%)', '비용 효율성']].copy()
+            st.dataframe(fin_display.style.format({"예산 (KRW)": "{:,.0f}", "실제 집행 비용 (KRW)": "{:,.0f}", "예산 소진율 (%)": "{:.1f}%", "비용 효율성": "{:.1f}"}), use_container_width=True)
+
+    # --- [TAB 2: 일정] ---
     with tab_gantt:
-        st.subheader("📅 프로젝트 일정")
+        st.subheader("📅 프로젝트 일정 (Gantt)")
         if not projects_df.empty:
             g_df = projects_df.dropna(subset=['공사 시작일', '종료일'])
             if not g_df.empty:
@@ -322,6 +379,7 @@ if sheet:
                 fig_g.update_yaxes(autorange="reversed")
                 st.plotly_chart(fig_g, use_container_width=True)
 
+    # --- [TAB 3: 지도/날씨] ---
     with tab_map:
         col_m, col_w = st.columns([2, 1])
         with col_m:
@@ -344,7 +402,6 @@ if sheet:
                     st.write(f"**상태:** {weather['desc']} | **습도:** {weather['humidity']}%")
                 else: st.warning("날씨 정보를 가져올 수 없습니다.")
             st.divider()
-            st.markdown("#### 📋 현장별 날씨 요약")
             if st.button("🔄 전체 현장 날씨 새로고침"):
                 with st.spinner("날씨 데이터를 불러오는 중..."):
                     summary_list = []
@@ -357,30 +414,35 @@ if sheet:
                 st.dataframe(st.session_state.weather_summary, hide_index=True, use_container_width=True)
             else: st.info("버튼을 눌러 요약을 불러오세요.")
 
+    # --- [TAB 4: 인력 최적화] ---
     with tab_man:
-        st.subheader("📊 인력 투입 분석")
+        st.subheader("👷 인력 최적화 (Labor Optimization)")
         if not managers_df.empty:
+            st.write("계획(예정) 인원 대비 현재(누적) 인원을 분석하여 최적의 재배치 안을 제시합니다.")
+            
+            # 최적화 데이터 표시
+            st.dataframe(managers_with_opt[['현장', '소장', '예정 구조물', '예정 전기', '누적 구조물', '누적 전기', '총 인원', '인력 차이', '인력 최적화 제안']], 
+                         use_container_width=True)
+            
+            # 인력 비교 차트
             melted = []
             for _, r in managers_df.iterrows():
                 s = str(r['현장'])
-                melted.append({'현장': s, '공종': '구조물', '구분': '계획', '인원': r['예정 구조물']})
-                melted.append({'현장': s, '공종': '구조물', '구분': '누적', '인원': r['누적 구조물']})
-                melted.append({'현장': s, '공종': '전기', '구분': '계획', '인원': r['예정 전기']})
-                melted.append({'현장': s, '공종': '전기', '구분': '누적', '인원': r['누적 전기']})
+                melted.append({'현장': s, '구분': '계획', '인원': r['예정 구조물'] + r['예정 전기']})
+                melted.append({'현장': s, '구분': '실적', '인원': r['누적 구조물'] + r['누적 전기']})
             df_m = pd.DataFrame(melted)
-            fig_m = go.Figure()
-            for dtype, color, name in [('계획', '#D3D3D3', '계획'), ('누적', '#636EFA', '누적')]:
-                subset = df_m[df_m['구분'] == dtype]
-                fig_m.add_trace(go.Bar(x=subset['현장'], y=subset['인원'], name=name, marker_color=color))
-            fig_m.update_layout(barmode='group', title="현장별 인력 계획 vs 누적")
+            fig_m = px.bar(df_m, x='현장', y='인원', color='구분', barmode='group', title="현장별 인력 계획 vs 실적")
             st.plotly_chart(fig_m, use_container_width=True)
-            if user_role == "admin":
-                st.write("📝 인력 데이터 수정")
-                ed_m = st.data_editor(managers_df, use_container_width=True)
-                if st.button("💾 인력 저장"):
-                    if save_data_to_sheet(sheet, ed_m, projects_df): st.success("저장 완료!"); st.rerun()
-            else: st.dataframe(managers_df, use_container_width=True)
 
+            if user_role == "admin":
+                st.write("📝 인력 데이터 직접 수정")
+                ed_m = st.data_editor(managers_df, use_container_width=True)
+                if st.button("💾 인력 데이터 전체 저장"):
+                    if save_data_to_sheet(sheet, ed_m, projects_df): st.success("저장 완료!"); st.rerun()
+            else:
+                st.dataframe(managers_df, use_container_width=True)
+
+    # --- [TAB 5: 공정율] ---
     with tab_prog:
         st.subheader("📈 공정율 관리")
         if not projects_df.empty:
@@ -403,27 +465,24 @@ if sheet:
                         if save_data_to_sheet(sheet, managers_df, up_p): st.session_state.master_p_df = up_p; st.success("업데이트 완료!"); st.rerun()
             else: st.dataframe(projects_df, use_container_width=True)
 
-    # [Phase 2.1] 신규 탭: 예측 및 리스크 관리
+    # --- [TAB 6: 예측/리스크] ---
     with tab_predict:
-        st.subheader("🔮 인공지능 기반 공정 예측 및 리스크 분석")
+        st.subheader("🔮 AI 기반 공정 예측 및 리스크 분석")
         if not projects_df.empty:
-            # 예측 데이터 계산
-            proj_df = analyze_project_projections(projects_df)
-            
             # 1. 요약 지표
-            avg_delay = proj_df['지연 예상(일)'].mean()
-            high_risk_count = len(proj_df[proj_df['리스크 점수'] >= 50])
+            avg_delay = projects_with_pred['지연 예상(일)'].mean()
+            high_risk_count = len(projects_with_pred[projects_with_pred['리스크 점수'] >= 50])
             
             m1, m2, m3 = st.columns(3)
             m1.metric("평균 예상 지연", f"{avg_delay:.1f} 일")
             m2.metric("고위험 현장", f"{high_risk_count} 개", delta_color="inverse")
-            m3.metric("전체 평균 공정율", f"{(proj_df['구조물 공정율'].mean() + proj_df['전기 공정율'].mean())/2:.1f} %")
+            m3.metric("평균 리스크 점수", f"{projects_with_pred['리스크 점수'].mean():.1f}")
             
             st.divider()
             
             # 2. 리스크 차트
             st.markdown("#### 📊 현장별 리스크 점수 (0=안전, 100=위험)")
-            fig_risk = px.bar(proj_df, x="현장", y="리스크 점수", color="리스크 점수",
+            fig_risk = px.bar(projects_with_pred, x="현장", y="리스크 점수", color="리스크 점수",
                              color_continuous_scale="Reds", title="현장별 위험도 지수")
             st.plotly_chart(fig_risk, use_container_width=True)
             
@@ -438,7 +497,7 @@ if sheet:
                 if val > 0: return 'color: red'
                 else: return 'color: green'
 
-            display_df = proj_df[[
+            display_df = projects_with_pred[[
                 '현장', '소장', '공정', '구조물 공정율', '전기 공정율', 
                 '종료일', '예상 종료일', '지연 예상(일)', '리스크 점수'
             ]].copy()
@@ -453,6 +512,7 @@ if sheet:
 
         else: st.info("데이터가 없습니다.")
 
+    # --- [TAB 7: 마스터] ---
     with tab_master:
         st.subheader("📋 마스터 데이터 편집")
         st.info("모든 데이터를 직접 수정할 수 있습니다. 수정 후 반드시 '저장' 버튼을 눌러주세요.")
@@ -464,8 +524,9 @@ if sheet:
         else:
             ed_m = st.data_editor(managers_df, use_container_width=True, num_rows="dynamic")
             if st.button("💾 인력 데이터 전체 저장"):
-                if save_data_to_sheet(sheet, ed_m, projects_df): st.success("저장 완료!"); st.rerun()
+                if save_data_to_sheet(sheet, ed_m, projects_df): st.session_state.master_p_df = ed_m; st.success("저장 완료!"); st.rerun()
 
+    # --- [TAB 8: 내보내기] ---
     with tab_res:
         st.subheader("📥 데이터 관리 및 내보내기")
         col_e1, col_e2 = st.columns(2)
